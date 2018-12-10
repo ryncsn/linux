@@ -111,6 +111,7 @@ static u32 __init allocate_aperture(void)
 		return 0;
 	}
 	memblock_reserve(addr, aper_size);
+	memblock_mark_nomap(addr, aper_size);
 	pr_info("Mapping aperture over RAM [mem %#010lx-%#010lx] (%uKB)\n",
 		addr, addr + aper_size - 1, aper_size >> 10);
 	register_nosave_region(addr >> PAGE_SHIFT,
