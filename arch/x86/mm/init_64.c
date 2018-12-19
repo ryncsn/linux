@@ -766,47 +766,6 @@ void __init paging_init(void)
 /*
  * Memory hotplug specific functions
  */
-#ifdef CONFIG_MEMORY_HOTPLUG
-/*
- * After memory hotplug the variables max_pfn, max_low_pfn and high_memory need
- * updating.
- */
-static void update_end_of_memory_vars(u64 start, u64 size)
-{
-	unsigned long end_pfn = PFN_UP(start + size);
-
-	if (end_pfn > max_pfn) {
-		max_pfn = end_pfn;
-		max_low_pfn = end_pfn;
-		high_memory = (void *)__va(max_pfn * PAGE_SIZE - 1) + 1;
-	}
-}
-
-int add_pages(int nid, unsigned long start_pfn, unsigned long nr_pages,
-		struct vmem_altmap *altmap, bool want_memblock)
-{
-	int ret;
-
-	ret = __add_pages(nid, start_pfn, nr_pages, altmap, want_memblock);
-	WARN_ON_ONCE(ret);
-
-	/* update max_pfn, max_low_pfn and high_memory */
-	update_end_of_memory_vars(start_pfn << PAGE_SHIFT,
-				  nr_pages << PAGE_SHIFT);
-
-	return ret;
-}
-
-int arch_add_memory(int nid, u64 start, u64 size, struct vmem_altmap *altmap,
-		bool want_memblock)
-{
-	unsigned long start_pfn = start >> PAGE_SHIFT;
-	unsigned long nr_pages = size >> PAGE_SHIFT;
-
-	init_memory_mapping(start, start + size);
-
-	return add_pages(nid, start_pfn, nr_pages, altmap, want_memblock);
-}
 
 #define PAGE_INUSE 0xFD
 
@@ -966,11 +925,12 @@ remove_pte_table(pte_t *pte_start, unsigned long addr, unsigned long end,
 
 static void __meminit
 remove_pmd_table(pmd_t *pmd_start, unsigned long addr, unsigned long end,
-		 bool direct, struct vmem_altmap *altmap)
+		 bool direct, struct vmem_altmap *altmap, bool split)
 {
-	unsigned long next, pages = 0;
+	unsigned long next, pages = 0, base_addr;
 	pte_t *pte_base;
 	pmd_t *pmd;
+	pgprot_t prot;
 	void *page_addr;
 
 	pmd = pmd_start + pmd_index(addr);
@@ -991,6 +951,18 @@ remove_pmd_table(pmd_t *pmd_start, unsigned long addr, unsigned long end,
 				pmd_clear(pmd);
 				spin_unlock(&init_mm.page_table_lock);
 				pages++;
+				continue;
+			} else if (direct && split) {
+				/* Split into PTE level */
+				base_addr = __pa(pmd_page_vaddr(*pmd));
+				prot = pte_pgprot(pte_clrhuge(*(pte_t *)pmd));
+				pte_base = alloc_low_page();
+				base_addr = phys_pte_init(pte_base, base_addr,
+						base_addr + PMD_SIZE,
+						prot);
+				spin_lock(&init_mm.page_table_lock);
+				pmd_populate_kernel(&init_mm, pmd, pte_base);
+				spin_unlock(&init_mm.page_table_lock);
 			} else {
 				/* If here, we are freeing vmemmap pages. */
 				memset((void *)addr, PAGE_INUSE, next - addr);
@@ -1005,9 +977,8 @@ remove_pmd_table(pmd_t *pmd_start, unsigned long addr, unsigned long end,
 					pmd_clear(pmd);
 					spin_unlock(&init_mm.page_table_lock);
 				}
+				continue;
 			}
-
-			continue;
 		}
 
 		pte_base = (pte_t *)pmd_page_vaddr(*pmd);
@@ -1022,11 +993,12 @@ remove_pmd_table(pmd_t *pmd_start, unsigned long addr, unsigned long end,
 
 static void __meminit
 remove_pud_table(pud_t *pud_start, unsigned long addr, unsigned long end,
-		 struct vmem_altmap *altmap, bool direct)
+		 struct vmem_altmap *altmap, bool direct, bool split)
 {
-	unsigned long next, pages = 0;
+	unsigned long next, pages = 0, base_addr;
 	pmd_t *pmd_base;
 	pud_t *pud;
+	pgprot_t prot;
 	void *page_addr;
 
 	pud = pud_start + pud_index(addr);
@@ -1047,6 +1019,19 @@ remove_pud_table(pud_t *pud_start, unsigned long addr, unsigned long end,
 				pud_clear(pud);
 				spin_unlock(&init_mm.page_table_lock);
 				pages++;
+				continue;
+			} else if (direct && split) {
+				/* Split into PMD level */
+				base_addr = __pa(pud_page_vaddr(*pud));
+				pmd_base = alloc_low_page();
+				prot = pte_pgprot(pte_clrhuge(*(pte_t *)pud));
+				base_addr = phys_pmd_init(pmd_base, base_addr,
+						base_addr + PUD_SIZE,
+						1 << PG_LEVEL_2M,
+						prot);
+				spin_lock(&init_mm.page_table_lock);
+				pud_populate(&init_mm, pud, pmd_base);
+				spin_unlock(&init_mm.page_table_lock);
 			} else {
 				/* If here, we are freeing vmemmap pages. */
 				memset((void *)addr, PAGE_INUSE, next - addr);
@@ -1061,13 +1046,12 @@ remove_pud_table(pud_t *pud_start, unsigned long addr, unsigned long end,
 					pud_clear(pud);
 					spin_unlock(&init_mm.page_table_lock);
 				}
+				continue;
 			}
-
-			continue;
 		}
 
 		pmd_base = pmd_offset(pud, 0);
-		remove_pmd_table(pmd_base, addr, next, direct, altmap);
+		remove_pmd_table(pmd_base, addr, next, direct, altmap, split);
 		free_pmd_table(pmd_base, pud);
 	}
 
@@ -1077,7 +1061,7 @@ remove_pud_table(pud_t *pud_start, unsigned long addr, unsigned long end,
 
 static void __meminit
 remove_p4d_table(p4d_t *p4d_start, unsigned long addr, unsigned long end,
-		 struct vmem_altmap *altmap, bool direct)
+		 struct vmem_altmap *altmap, bool direct, bool split)
 {
 	unsigned long next, pages = 0;
 	pud_t *pud_base;
@@ -1093,7 +1077,7 @@ remove_p4d_table(p4d_t *p4d_start, unsigned long addr, unsigned long end,
 		BUILD_BUG_ON(p4d_large(*p4d));
 
 		pud_base = pud_offset(p4d, 0);
-		remove_pud_table(pud_base, addr, next, altmap, direct);
+		remove_pud_table(pud_base, addr, next, altmap, direct, split);
 		/*
 		 * For 4-level page tables we do not want to free PUDs, but in the
 		 * 5-level case we should free them. This code will have to change
@@ -1110,7 +1094,7 @@ remove_p4d_table(p4d_t *p4d_start, unsigned long addr, unsigned long end,
 /* start and end are both virtual address. */
 static void __meminit
 remove_pagetable(unsigned long start, unsigned long end, bool direct,
-		struct vmem_altmap *altmap)
+		struct vmem_altmap *altmap, bool split)
 {
 	unsigned long next;
 	unsigned long addr;
@@ -1125,28 +1109,70 @@ remove_pagetable(unsigned long start, unsigned long end, bool direct,
 			continue;
 
 		p4d = p4d_offset(pgd, 0);
-		remove_p4d_table(p4d, addr, next, altmap, direct);
+		remove_p4d_table(p4d, addr, next, altmap, direct, split);
 	}
 
 	flush_tlb_all();
 }
 
-void __ref vmemmap_free(unsigned long start, unsigned long end,
-		struct vmem_altmap *altmap)
-{
-	remove_pagetable(start, end, false, altmap);
-}
-
-#ifdef CONFIG_MEMORY_HOTREMOVE
 static void __meminit
-kernel_physical_mapping_remove(unsigned long start, unsigned long end)
+kernel_physical_mapping_remove(unsigned long start, unsigned long end, bool split)
 {
 	start = (unsigned long)__va(start);
 	end = (unsigned long)__va(end);
 
-	remove_pagetable(start, end, true, NULL);
+	remove_pagetable(start, end, true, NULL, split);
 }
 
+#ifdef CONFIG_MEMORY_HOTPLUG
+/*
+ * After memory hotplug the variables max_pfn, max_low_pfn and high_memory need
+ * updating.
+ */
+static void update_end_of_memory_vars(u64 start, u64 size)
+{
+	unsigned long end_pfn = PFN_UP(start + size);
+
+	if (end_pfn > max_pfn) {
+		max_pfn = end_pfn;
+		max_low_pfn = end_pfn;
+		high_memory = (void *)__va(max_pfn * PAGE_SIZE - 1) + 1;
+	}
+}
+
+int add_pages(int nid, unsigned long start_pfn, unsigned long nr_pages,
+		struct vmem_altmap *altmap, bool want_memblock)
+{
+	int ret;
+
+	ret = __add_pages(nid, start_pfn, nr_pages, altmap, want_memblock);
+	WARN_ON_ONCE(ret);
+
+	/* update max_pfn, max_low_pfn and high_memory */
+	update_end_of_memory_vars(start_pfn << PAGE_SHIFT,
+				  nr_pages << PAGE_SHIFT);
+
+	return ret;
+}
+
+int arch_add_memory(int nid, u64 start, u64 size, struct vmem_altmap *altmap,
+		bool want_memblock)
+{
+	unsigned long start_pfn = start >> PAGE_SHIFT;
+	unsigned long nr_pages = size >> PAGE_SHIFT;
+
+	init_memory_mapping(start, start + size);
+
+	return add_pages(nid, start_pfn, nr_pages, altmap, want_memblock);
+}
+
+void __ref vmemmap_free(unsigned long start, unsigned long end,
+		struct vmem_altmap *altmap)
+{
+	remove_pagetable(start, end, false, altmap, false);
+}
+
+#ifdef CONFIG_MEMORY_HOTREMOVE
 int __ref arch_remove_memory(u64 start, u64 size, struct vmem_altmap *altmap)
 {
 	unsigned long start_pfn = start >> PAGE_SHIFT;
@@ -1161,7 +1187,7 @@ int __ref arch_remove_memory(u64 start, u64 size, struct vmem_altmap *altmap)
 	zone = page_zone(page);
 	ret = __remove_pages(zone, start_pfn, nr_pages, altmap);
 	WARN_ON_ONCE(ret);
-	kernel_physical_mapping_remove(start, start + size);
+	kernel_physical_mapping_remove(start, start + size, false);
 
 	return ret;
 }
@@ -1182,6 +1208,9 @@ static void __init register_page_bootmem_info(void)
 
 void __init mem_init(void)
 {
+	u64 i;
+	phys_addr_t start, end;
+
 	pci_iommu_alloc();
 
 	/* clear_bss() already clear the empty_zero_page */
@@ -1190,6 +1219,13 @@ void __init mem_init(void)
 	memblock_free_all();
 	after_bootmem = 1;
 	x86_init.hyper.init_after_bootmem();
+
+	/* unmap reserved regions marked as MEMBLOCK_NOMAP */
+	for_each_reserved_mem_region(i, &start, &end) {
+		if (memblock_is_memory(start) && !memblock_is_map_memory(start)) {
+			kernel_physical_mapping_remove(start, end + 1, true);
+		}
+	}
 
 	/*
 	 * Must be done after boot memory is put on freelist, because here we
