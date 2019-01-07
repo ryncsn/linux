@@ -286,8 +286,10 @@ kimage_file_alloc_init(struct kimage **rimage, int kernel_fd,
 		goto out_free_image;
 
 	ret = sanity_check_segment_list(image);
-	if (ret)
+	if (ret) {
+		pr_err("Sanity test failed\n");
 		goto out_free_post_load_bufs;
+	}
 
 	ret = -ENOMEM;
 	image->control_code_page = kimage_alloc_control_pages(image,
