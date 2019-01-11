@@ -53,6 +53,9 @@ static struct proc_dir_entry *proc_vmcore;
 /* Device Dump list and mutex to synchronize access to list */
 static LIST_HEAD(vmcoredd_list);
 static DEFINE_MUTEX(vmcoredd_mutex);
+
+/* Device Dump Limit */
+static size_t vmcoredd_limit;
 #endif /* CONFIG_PROC_VMCORE_DEVICE_DUMP */
 
 /* Device Dump Size */
@@ -1465,6 +1468,11 @@ int vmcore_add_device_dump(struct vmcoredd_data *data)
 	data_size = roundup(sizeof(struct vmcoredd_header) + data->size,
 			    PAGE_SIZE);
 
+	if (vmcoredd_orig_sz + data_size >= vmcoredd_limit) {
+		ret = -ENOMEM;
+		goto out_err;
+	}
+
 	/* Allocate buffer for driver's to write their dumps */
 	buf = vmcore_alloc_buf(data_size);
 	if (!buf) {
@@ -1502,6 +1510,16 @@ out_err:
 	return ret;
 }
 EXPORT_SYMBOL(vmcore_add_device_dump);
+
+static int __init parse_vmcoredd_limit(char *arg) {
+	char *end;
+	if (!arg)
+		return -EINVAL;
+	vmcoredd_limit = memparse(arg, &end);
+	return end > arg ? 0 : -EINVAL;
+
+}
+__setup("vmcoredd.limit=", parse_vmcoredd_limit);
 #endif /* CONFIG_PROC_VMCORE_DEVICE_DUMP */
 
 /* Free all dumps in vmcore device dump list */
