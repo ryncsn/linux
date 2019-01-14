@@ -32,6 +32,7 @@
 #include <linux/filter.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
+#include <linux/crash_dump.h>
 #include <net/route.h>
 #include <net/xdp.h>
 #include <net/net_failover.h>
@@ -240,6 +241,8 @@ struct virtnet_info {
 
 	/* failover when STANDBY feature enabled */
 	struct failover *failover;
+
+	struct vmcoredd_data vmcoredd;
 };
 
 struct padded_vnet_hdr {
@@ -2919,6 +2922,11 @@ static int virtnet_validate(struct virtio_device *vdev)
 	return 0;
 }
 
+static int vmcoredd_collect_nothing(struct vmcoredd_data *data, void *buf)
+{
+	return 0;
+}
+
 static int virtnet_probe(struct virtio_device *vdev)
 {
 	int i, err = -ENOMEM;
@@ -3116,6 +3124,13 @@ static int virtnet_probe(struct virtio_device *vdev)
 
 	pr_debug("virtnet: registered device %s with %d RX and TX vq's\n",
 		 dev->name, max_queue_pairs);
+
+	struct vmcoredd_data *data = &vi->vmcoredd;
+	data->size = 4096;
+	snprintf(data->dump_name, sizeof(data->dump_name), "dummy_dumpcore_virtnet");
+	data->vmcoredd_callback = vmcoredd_collect_nothing;
+
+	vmcore_add_device_dump(data);
 
 	return 0;
 
