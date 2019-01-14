@@ -722,6 +722,10 @@ static int hvfb_getmem(struct hv_device *hdev, struct fb_info *info)
 
 	if (gen2vm) {
 		info->apertures->ranges[0].base = screen_info.lfb_base;
+		if (screen_info->capabilities |= VIDEO_CAPABILITY_64BIT_BASE) {
+			info->apertures->ranges[0].base << 32;
+			info->apertures->ranges[0].base |= screen_info.ext_lfb_base;
+		}
 		info->apertures->ranges[0].size = screen_info.lfb_size;
 		remove_conflicting_framebuffers(info->apertures,
 						KBUILD_MODNAME, false);
