@@ -74,9 +74,9 @@ static void __init early_code_mapping_set_exec(int executable)
 
 pgd_t * __init efi_call_phys_prolog(void)
 {
-	unsigned long vaddr, addr_pgd, addr_p4d, addr_pud;
-	pgd_t *save_pgd, *pgd_k, *pgd_efi;
-	p4d_t *p4d, *p4d_k, *p4d_efi;
+	unsigned long addr_pgd, addr_p4d, addr_pud;
+	pgd_t *save_pgd, *pgd_efi;
+	p4d_t *p4d, *p4d_efi;
 	pud_t *pud;
 
 	int pgd;
@@ -102,7 +102,6 @@ pgd_t * __init efi_call_phys_prolog(void)
 	 */
 	for (pgd = 0; pgd < n_pgds; pgd++) {
 		addr_pgd = (unsigned long)(pgd * PGDIR_SIZE);
-		vaddr = (unsigned long)__va(pgd * PGDIR_SIZE);
 		pgd_efi = pgd_offset_k(addr_pgd);
 		save_pgd[pgd] = *pgd_efi;
 
@@ -128,15 +127,18 @@ pgd_t * __init efi_call_phys_prolog(void)
 				if (addr_pud > (max_pfn << PAGE_SHIFT))
 					break;
 
-				vaddr = (unsigned long)__va(addr_pud);
-
-				pgd_k = pgd_offset_k(vaddr);
-				p4d_k = p4d_offset(pgd_k, vaddr);
-				pud[j] = *pud_offset(p4d_k, vaddr);
+				pr_err("Mapping %lx\n", addr_pud);
+				spin_lock(&init_mm.page_table_lock);
+				set_pte_safe((pte_t *)(pud + j),
+						pfn_pte(addr_pud >> PAGE_SHIFT,
+							PAGE_KERNEL_LARGE_EXEC));
+				spin_unlock(&init_mm.page_table_lock);
+				pr_err("Mapped %lx\n", addr_pud);
 			}
 		}
 		pgd_offset_k(pgd * PGDIR_SIZE)->pgd &= ~_PAGE_NX;
 	}
+	pr_err("Mapping Done\n");
 
 out:
 	__flush_tlb_all();
