@@ -654,6 +654,15 @@ static void native_machine_emergency_restart(void)
 void native_machine_shutdown(void)
 {
 	/* Stop the cpus and apics */
+
+	/*
+	 * Disable the local irq to not receive the per-cpu
+	 * timer interrupt which may trigger scheduler's load balance.
+	 * Also avoid any accident usage of APIC staff which will be
+	 * unavailable after clear_IO_APIC.
+	 */
+	local_irq_disable();
+
 #ifdef CONFIG_X86_IO_APIC
 	/*
 	 * Disabling IO APIC before local APIC is a workaround for
@@ -671,11 +680,8 @@ void native_machine_shutdown(void)
 
 #ifdef CONFIG_SMP
 	/*
-	 * Stop all of the others. Also disable the local irq to
-	 * not receive the per-cpu timer interrupt which may trigger
-	 * scheduler's load balance.
+	 * We have all IRQs disabled, safe to stop all other CPUs
 	 */
-	local_irq_disable();
 	stop_other_cpus();
 #endif
 
