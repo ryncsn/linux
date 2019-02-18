@@ -26,9 +26,13 @@
 #include <linux/hyperv.h>
 #include <linux/slab.h>
 #include <linux/cpuhotplug.h>
+#include <linux/smp.h>
+#include <linux/reboot.h>
 #include <asm/hypervisor.h>
 #include <asm/mshyperv.h>
 #include <asm/apic.h>
+#include <asm/delay.h>
+#include <asm/mce.h>
 
 #include <asm/trace/hyperv.h>
 
@@ -237,6 +241,57 @@ static void hv_send_ipi_self(int vector)
 		orig_apic.send_IPI_self(vector);
 }
 
+static atomic_t stopping_cpu = ATOMIC_INIT(-1);
+
+static int hv_nmi_callback(unsigned int val, struct pt_regs *regs)
+{
+	/* We are registered on stopping cpu too, avoid spurious NMI */
+	if (raw_smp_processor_id() == atomic_read(&stopping_cpu))
+		return NMI_HANDLED;
+
+	stop_this_cpu(NULL);
+
+	return NMI_HANDLED;
+}
+
+static void hv_stop_other_cpus(int wait)
+{
+	unsigned long flags;
+	unsigned long timeout;
+
+	if (reboot_force)
+		return;
+
+	if (atomic_cmpxchg(&stopping_cpu, -1, safe_smp_processor_id()) != -1)
+		return;
+
+	/* Skip the REBOOT_VECTOR, use NMI directly */
+	if ((num_online_cpus() > 1))  {
+		if (register_nmi_handler(NMI_LOCAL, hv_nmi_callback,
+					 NMI_FLAG_FIRST, "smp_stop"))
+			goto finish;
+
+		/* sync above data before sending IRQ */
+		wmb();
+
+		apic->send_IPI_allbutself(NMI_VECTOR);
+
+		/*
+		 * Don't wait longer than a second if the caller
+		 * didn't ask us to wait.
+		 */
+		timeout = USEC_PER_SEC;
+		while (num_online_cpus() > 1 && (wait || timeout--))
+			udelay(1);
+	}
+
+finish:
+	local_irq_save(flags);
+	disable_local_APIC();
+	mcheck_cpu_clear(this_cpu_ptr(&cpu_info));
+	local_irq_restore(flags);
+}
+
 void __init hv_apic_init(void)
 {
 	if (ms_hyperv.hints & HV_X64_CLUSTER_IPI_RECOMMENDED) {
@@ -245,6 +300,7 @@ void __init hv_apic_init(void)
 		 * Set the IPI entry points.
 		 */
 		orig_apic = *apic;
+		smp_ops.stop_other_cpus = hv_stop_other_cpus;
 
 		apic->send_IPI = hv_send_ipi;
 		apic->send_IPI_mask = hv_send_ipi_mask;
