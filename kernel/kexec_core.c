@@ -39,6 +39,7 @@
 #include <linux/compiler.h>
 #include <linux/hugetlb.h>
 #include <linux/frame.h>
+#include <linux/kthread.h>
 
 #include <asm/page.h>
 #include <asm/sections.h>
@@ -48,6 +49,7 @@
 #include "kexec_internal.h"
 
 DEFINE_MUTEX(kexec_mutex);
+DEFINE_MUTEX(test_mutex);
 
 /* Per cpu memory for storing cpu states in case of system crash. */
 note_buf_t __percpu *crash_notes;
@@ -1111,6 +1113,18 @@ static int __init crash_notes_memory_init(void)
 }
 subsys_initcall(crash_notes_memory_init);
 
+static int mutex_holder(void *data) {
+	struct mutex *_mutex = &test_mutex;
+
+	for (;;) {
+		pr_info("DEBUG: Kexec mutext test kthread looping ...");
+		mutex_lock(_mutex);
+		pr_info("DEBUG: Print something.");
+		mutex_unlock(_mutex);
+		pr_info("DEBUG: Kexec mutex test ktread EXIT !!!");
+	}
+	return 0;
+}
 
 /*
  * Move into place and start executing a preloaded standalone
@@ -1119,6 +1133,7 @@ subsys_initcall(crash_notes_memory_init);
 int kernel_kexec(void)
 {
 	int error = 0;
+	struct task_struct *test_task;
 
 	if (!mutex_trylock(&kexec_mutex))
 		return -EBUSY;
@@ -1160,6 +1175,14 @@ int kernel_kexec(void)
 	} else
 #endif
 	{
+		mutex_lock(&test_mutex);
+		if (cpu_online(1)) {
+			test_task = kthread_create_on_cpu(mutex_holder, NULL, 1, "Test Mutext Holder");
+			wake_up_process(test_task);
+		} else {
+			pr_err("CPU 1 is required for the test.");
+		}
+
 		kexec_in_progress = true;
 		kernel_restart_prepare(NULL);
 		migrate_to_reboot_cpu();
@@ -1174,6 +1197,7 @@ int kernel_kexec(void)
 		pr_emerg("Starting new kernel\n");
 		machine_shutdown();
 	}
+	mutex_unlock(&test_mutex);
 
 	machine_kexec(kexec_image);
 
