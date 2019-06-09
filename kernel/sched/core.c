@@ -1519,16 +1519,25 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 		for_each_cpu(dest_cpu, nodemask) {
 			if (!cpu_active(dest_cpu))
 				continue;
-			if (cpumask_test_cpu(dest_cpu, &p->cpus_allowed))
+			if (!cpu_online(dest_cpu))
+				continue;
+			if (cpumask_test_cpu(dest_cpu, &p->cpus_allowed)) {
+				pr_err("DEBUG: Found CPU %d within same NUMA node\n", dest_cpu);
 				return dest_cpu;
+			}
 		}
 	}
 
 	for (;;) {
 		/* Any allowed, online CPU? */
 		for_each_cpu(dest_cpu, &p->cpus_allowed) {
-			if (!is_cpu_allowed(p, dest_cpu))
+			// if (!is_cpu_allowed(p, dest_cpu))
+			// 	continue;
+
+			if (!cpu_online(dest_cpu))
 				continue;
+
+			pr_err("DEBUG: CPU %d is online and allowed\n", dest_cpu);
 
 			goto out;
 		}
@@ -1539,6 +1548,7 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 			if (IS_ENABLED(CONFIG_CPUSETS)) {
 				cpuset_cpus_allowed_fallback(p);
 				state = possible;
+				pr_err("DEBUG: CPU %d is possible to migrate to\n", dest_cpu);
 				break;
 			}
 			/* Fall-through */
@@ -1592,8 +1602,11 @@ int select_task_rq(struct task_struct *p, int cpu, int sd_flags, int wake_flags)
 	 * [ this allows ->select_task() to simply return task_cpu(p) and
 	 *   not worry about this generic constraint ]
 	 */
-	if (unlikely(!is_cpu_allowed(p, cpu)))
+	if (unlikely(!is_cpu_allowed(p, cpu))) {
+		pr_err("DEBUG: CPU is not allowed, Switch CPU from %d\n", cpu);
 		cpu = select_fallback_rq(task_cpu(p), p);
+		pr_err("DEBUG: CPU is not allowed, Switched CPU to %d\n", cpu);
+	}
 
 	return cpu;
 }
