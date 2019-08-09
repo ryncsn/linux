@@ -106,7 +106,7 @@ KERNEL_ATTR_RO(kexec_crash_loaded);
 static ssize_t kexec_crash_size_show(struct kobject *kobj,
 				       struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%zu\n", crash_get_memory_size());
+	return sprintf(buf, "%zu\n", crash_get_memory_size(false));
 }
 static ssize_t kexec_crash_size_store(struct kobject *kobj,
 				   struct kobj_attribute *attr,
@@ -118,10 +118,31 @@ static ssize_t kexec_crash_size_store(struct kobject *kobj,
 	if (kstrtoul(buf, 0, &cnt))
 		return -EINVAL;
 
-	ret = crash_shrink_memory(cnt);
+	ret = crash_shrink_memory(cnt, false);
 	return ret < 0 ? ret : count;
 }
 KERNEL_ATTR_RW(kexec_crash_size);
+
+static ssize_t kexec_crash_low_size_show(struct kobject *kobj,
+				       struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%zu\n", crash_get_memory_size(true));
+}
+
+static ssize_t kexec_crash_low_size_store(struct kobject *kobj,
+				   struct kobj_attribute *attr,
+				   const char *buf, size_t count)
+{
+	unsigned long cnt;
+	int ret;
+
+	if (kstrtoul(buf, 0, &cnt))
+		return -EINVAL;
+
+	ret = crash_shrink_memory(cnt, true);
+	return ret < 0 ? ret : count;
+}
+KERNEL_ATTR_RW(kexec_crash_low_size);
 
 #endif /* CONFIG_KEXEC_CORE */
 
@@ -221,6 +242,7 @@ static struct attribute * kernel_attrs[] = {
 	&kexec_loaded_attr.attr,
 	&kexec_crash_loaded_attr.attr,
 	&kexec_crash_size_attr.attr,
+	&kexec_crash_low_size_attr.attr,
 #endif
 #ifdef CONFIG_CRASH_CORE
 	&vmcoreinfo_attr.attr,
