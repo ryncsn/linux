@@ -981,13 +981,19 @@ void crash_kexec(struct pt_regs *regs)
 	}
 }
 
-size_t crash_get_memory_size(void)
+size_t crash_get_memory_size(bool low_mem)
 {
 	size_t size = 0;
+	struct resource *crash_res;
+
+	if (low_mem)
+		crash_res = &crashk_low_res;
+	else
+		crash_res = &crashk_res;
 
 	mutex_lock(&kexec_mutex);
-	if (crashk_res.end != crashk_res.start)
-		size = resource_size(&crashk_res);
+	if (crash_res->end != crash_res->start)
+		size = resource_size(crash_res);
 	mutex_unlock(&kexec_mutex);
 	return size;
 }
@@ -1001,12 +1007,17 @@ void __weak crash_free_reserved_phys_range(unsigned long begin,
 		free_reserved_page(boot_pfn_to_page(addr >> PAGE_SHIFT));
 }
 
-int crash_shrink_memory(unsigned long new_size)
+int crash_shrink_memory(unsigned long new_size, bool low_mem)
 {
 	int ret = 0;
 	unsigned long start, end;
 	unsigned long old_size;
-	struct resource *ram_res;
+	struct resource *ram_res, *crash_res;
+
+	if (low_mem)
+		crash_res = &crashk_low_res;
+	else
+		crash_res = &crashk_res;
 
 	mutex_lock(&kexec_mutex);
 
@@ -1014,8 +1025,8 @@ int crash_shrink_memory(unsigned long new_size)
 		ret = -ENOENT;
 		goto unlock;
 	}
-	start = crashk_res.start;
-	end = crashk_res.end;
+	start = crash_res->start;
+	end = crash_res->end;
 	old_size = (end == 0) ? 0 : end - start + 1;
 	if (new_size >= old_size) {
 		ret = (new_size == old_size) ? 0 : -EINVAL;
@@ -1031,17 +1042,17 @@ int crash_shrink_memory(unsigned long new_size)
 	start = roundup(start, KEXEC_CRASH_MEM_ALIGN);
 	end = roundup(start + new_size, KEXEC_CRASH_MEM_ALIGN);
 
-	crash_free_reserved_phys_range(end, crashk_res.end);
+	crash_free_reserved_phys_range(end, crash_res->end);
 
-	if ((start == end) && (crashk_res.parent != NULL))
-		release_resource(&crashk_res);
+	if ((start == end) && (crash_res->parent != NULL))
+		release_resource(crash_res);
 
 	ram_res->start = end;
-	ram_res->end = crashk_res.end;
+	ram_res->end = crash_res->end;
 	ram_res->flags = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM;
 	ram_res->name = "System RAM";
 
-	crashk_res.end = end - 1;
+	crash_res->end = end - 1;
 
 	insert_resource(&iomem_resource, ram_res);
 
