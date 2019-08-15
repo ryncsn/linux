@@ -1236,6 +1236,8 @@ void __init mem_init(void)
 {
 	pci_iommu_alloc();
 
+	reserve_crashkernel_late();
+
 	/* clear_bss() already clear the empty_zero_page */
 
 	/* this will put all memory onto the freelists */

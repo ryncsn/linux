@@ -526,6 +526,52 @@ static int __init reserve_crashkernel_low(void)
 	return 0;
 }
 
+#ifdef CONFIG_X86_64
+void __init reserve_crashkernel_late(void)
+{
+	unsigned long long low_base, low_size;
+	int ret;
+
+	/* return when crashkernel is not reserved or high is in use */
+	if (crashk_low_res.start || !crashk_res.start)
+		return;
+
+	low_size = swiotlb_size_or_default() + (8UL << 20);
+	low_base = memblock_find_in_range(CRASH_ALIGN, min(CRASH_ADDR_LOW_MAX, crashk_res.start),
+					  low_size, CRASH_ALIGN);
+
+	ret = memblock_reserve(low_base, low_size);
+	if (ret) {
+		pr_err("%s: Error reserving extra crashkernel memory. (%d)\n", __func__, ret);
+		return;
+	}
+
+	pr_info("Reserving %ldMB of low memory at %ldMB for crashkernel (System low RAM: %ldMB)\n",
+		(unsigned long)(low_size >> 20),
+		(unsigned long)(low_base >> 20),
+		(unsigned long)memblock_mem_size(1UL << (32 - PAGE_SHIFT)));
+
+	crashk_low_res.start = low_base;
+	crashk_low_res.end   = low_base + low_size - 1;
+	insert_resource(&iomem_resource, &crashk_low_res);
+}
+
+static int __init free_crashkernel_low(void)
+{
+	if (crashk_res.start >= CRASH_ADDR_LOW_MAX || swiotlb)
+		return 0;
+
+	if (crashk_low_res.start) {
+		pr_info("Freeing unneeded low memory for crashkernel\n");
+		remove_resource(&crashk_low_res);
+		memblock_free(crashk_low_res.start, resource_size(&crashk_low_res));
+	}
+
+	return 0;
+}
+late_initcall(free_crashkernel_low);
+#endif
+
 static void __init reserve_crashkernel(void)
 {
 	unsigned long long crash_size, crash_base, total_mem;
