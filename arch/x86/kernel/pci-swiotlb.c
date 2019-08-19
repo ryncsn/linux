@@ -61,8 +61,10 @@ IOMMU_INIT(pci_swiotlb_detect_4gb,
 
 void __init pci_swiotlb_init(void)
 {
-	if (swiotlb)
+	if (swiotlb) {
 		swiotlb_init(0);
+		swiotlb_resource_init();
+	}
 }
 
 void __init pci_swiotlb_late_init(void)
