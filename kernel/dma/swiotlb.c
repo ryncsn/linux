@@ -71,6 +71,17 @@ enum swiotlb_force swiotlb_force;
 phys_addr_t io_tlb_start, io_tlb_end;
 
 /*
+ * Mark swiotlb region in /proc/iomem when swiotlb is allocated by this API and
+ * not using late allocation.
+ */
+static struct resource swiotlb_resource = {
+	.name	= "Software IO TLB",
+	.start	= 0,
+	.end	= 0,
+	.flags	= IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM
+};
+
+/*
  * The number of IO TLB blocks (in groups of 64) between io_tlb_start and
  * io_tlb_end.  This is command line adjustable via setup_io_tlb_npages.
  */
@@ -269,6 +280,18 @@ swiotlb_init(int verbose)
 }
 
 /*
+ * Inserts the SWIOTLB region into the iomem resource map and be
+ * visible within /proc/iomem.
+ */
+void swiotlb_resource_init() {
+	unsigned long bytes = io_tlb_nslabs << IO_TLB_SHIFT;
+
+	swiotlb_resource.start = io_tlb_start;
+	swiotlb_resource.end = io_tlb_start + bytes - 1;
+	insert_resource(&iomem_resource, &swiotlb_resource);
+}
+
+/*
  * Systems with larger DMA zones (those that don't support ISA) can
  * initialize the swiotlb later using the slab allocator if needed.
  * This should be just like above, but with some error catching.
@@ -323,6 +346,12 @@ static void swiotlb_cleanup(void)
 	io_tlb_start = 0;
 	io_tlb_nslabs = 0;
 	max_segment = 0;
+
+	if (swiotlb_resource.start) {
+		remove_resource(&swiotlb_resource);
+		swiotlb_resource.start = 0;
+		swiotlb_resource.end = 0;
+	}
 }
 
 int
