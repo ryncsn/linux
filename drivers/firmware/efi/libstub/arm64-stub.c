@@ -140,7 +140,7 @@ efi_status_t handle_kernel_image(efi_system_table_t *sys_table_arg,
 	if (status != EFI_SUCCESS) {
 		*reserve_size = kernel_memsize + TEXT_OFFSET;
 		status = efi_low_alloc(sys_table_arg, *reserve_size,
-				       MIN_KIMG_ALIGN, reserve_addr);
+				       MIN_KIMG_ALIGN, reserve_addr, 0);
 
 		if (status != EFI_SUCCESS) {
 			pr_efi_err(sys_table_arg, "Failed to relocate kernel\n");
