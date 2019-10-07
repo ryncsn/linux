@@ -53,23 +53,6 @@ note_buf_t __percpu *crash_notes;
 /* Flag to indicate we are going to kexec a new kernel */
 bool kexec_in_progress = false;
 
-
-/* Location of the reserved area for the crash kernel */
-struct resource crashk_res = {
-	.name  = "Crash kernel",
-	.start = 0,
-	.end   = 0,
-	.flags = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM,
-	.desc  = IORES_DESC_CRASH_KERNEL
-};
-struct resource crashk_low_res = {
-	.name  = "Crash kernel",
-	.start = 0,
-	.end   = 0,
-	.flags = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM,
-	.desc  = IORES_DESC_CRASH_KERNEL
-};
-
 int kexec_should_crash(struct task_struct *p)
 {
 	/*
@@ -981,75 +964,6 @@ void crash_kexec(struct pt_regs *regs)
 		 */
 		atomic_set(&panic_cpu, PANIC_CPU_INVALID);
 	}
-}
-
-size_t crash_get_memory_size(void)
-{
-	size_t size = 0;
-
-	mutex_lock(&kexec_mutex);
-	if (crashk_res.end != crashk_res.start)
-		size = resource_size(&crashk_res);
-	mutex_unlock(&kexec_mutex);
-	return size;
-}
-
-void __weak crash_free_reserved_phys_range(unsigned long begin,
-					   unsigned long end)
-{
-	unsigned long addr;
-
-	for (addr = begin; addr < end; addr += PAGE_SIZE)
-		free_reserved_page(boot_pfn_to_page(addr >> PAGE_SHIFT));
-}
-
-int crash_shrink_memory(unsigned long new_size)
-{
-	int ret = 0;
-	unsigned long start, end;
-	unsigned long old_size;
-	struct resource *ram_res;
-
-	mutex_lock(&kexec_mutex);
-
-	if (kexec_crash_image) {
-		ret = -ENOENT;
-		goto unlock;
-	}
-	start = crashk_res.start;
-	end = crashk_res.end;
-	old_size = (end == 0) ? 0 : end - start + 1;
-	if (new_size >= old_size) {
-		ret = (new_size == old_size) ? 0 : -EINVAL;
-		goto unlock;
-	}
-
-	ram_res = kzalloc(sizeof(*ram_res), GFP_KERNEL);
-	if (!ram_res) {
-		ret = -ENOMEM;
-		goto unlock;
-	}
-
-	start = roundup(start, KEXEC_CRASH_MEM_ALIGN);
-	end = roundup(start + new_size, KEXEC_CRASH_MEM_ALIGN);
-
-	crash_free_reserved_phys_range(end, crashk_res.end);
-
-	if ((start == end) && (crashk_res.parent != NULL))
-		release_resource(&crashk_res);
-
-	ram_res->start = end;
-	ram_res->end = crashk_res.end;
-	ram_res->flags = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM;
-	ram_res->name = "System RAM";
-
-	crashk_res.end = end - 1;
-
-	insert_resource(&iomem_resource, ram_res);
-
-unlock:
-	mutex_unlock(&kexec_mutex);
-	return ret;
 }
 
 void crash_save_cpu(struct pt_regs *regs, int cpu)
