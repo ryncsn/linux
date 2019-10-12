@@ -6,9 +6,8 @@
 #include <linux/vmalloc.h>
 #include <linux/device.h>
 #include <linux/memory_hotplug.h>
-
-#include <linux/writeback.h>
-#include <linux/swap.h>
+#include <linux/memory.h>
+#include <linux/page-isolation.h>
 
 #include <asm/page.h>
 #include <asm/sections.h>
@@ -32,6 +31,25 @@ struct resource crashk_low_res = {
 };
 
 unsigned long long crashk_fragments_kdump;
+
+/*
+ * The crashkernel memory is reserved at boot, we want a way to dynamicaly
+ * alloc more usable page for second kernel so userspace will not hit OOM
+ */
+struct crash_fragments_hdr {
+	int entry_num;
+	int container_size;
+};
+
+struct crash_fragments_entry {
+	unsigned long long paddr;	/* PFN of starting for free page fragment */
+	int size;			/* How many continues pages available */
+};
+
+struct crash_fragments {
+	struct crash_fragments_hdr hdr;
+	struct crash_fragments_entry entries[];
+} __packed *crashk_fragments;
 
 /*
  * parsing the "crashkernel" commandline
@@ -369,3 +387,300 @@ unlock:
 	mutex_unlock(&kexec_mutex);
 	return ret;
 }
+
+size_t crash_get_dynamic_memory_size(void)
+{
+	int i;
+	size_t size = 0;
+
+	if (!crashk_fragments) {
+		return 0;
+	}
+
+	pr_err("Dynmem adddress at %llx with size %d/%d\n", __pa(crashk_fragments),
+			crashk_fragments->hdr.entry_num,
+			crashk_fragments->hdr.container_size);
+	mutex_lock(&kexec_mutex);
+	for (i = 0; i < crashk_fragments->hdr.entry_num; i++)
+		size += crashk_fragments->entries[i].size;
+	mutex_unlock(&kexec_mutex);
+
+	return size;
+}
+
+int crash_shrink_dynamic_memory(unsigned long new_size)
+{
+	// TODO
+	return 0;
+}
+
+phys_addr_t paddr_crashk_fragments(void)
+{
+	return __pa((void*)crashk_fragments);
+}
+
+static int add_crash_fragment(unsigned long long paddr, size_t size)
+{
+	struct crash_fragments *old;
+	struct crash_fragments_hdr *hdr;
+
+	int entry_num = 0, container_size = 64;
+
+	pr_err("Adding adddress at %llx with size %ld\n", paddr, size);
+
+	if (!crashk_fragments) {
+		crashk_fragments = kzalloc(GFP_KERNEL,
+					   sizeof(struct crash_fragments_hdr) + sizeof(struct crash_fragments_entry) * container_size);
+		if (!crashk_fragments)
+			return -ENOMEM;
+
+		crashk_fragments->hdr.entry_num = entry_num;
+		crashk_fragments->hdr.container_size = container_size;
+
+		pr_err("Initial alloc %d@%llx\n", container_size, crashk_fragments);
+	}
+
+	hdr = &crashk_fragments->hdr;
+	if (hdr->container_size == hdr->entry_num) {
+		entry_num = hdr->entry_num;
+		container_size = hdr->container_size * 2;
+
+		old = crashk_fragments;
+		crashk_fragments = kzalloc(GFP_KERNEL,
+					   sizeof(struct crash_fragments_hdr) + sizeof(struct crash_fragments_entry) * container_size);
+		if (!crashk_fragments)
+			return -ENOMEM;
+		pr_err("Extend alloc %d@%llx\n", container_size, crashk_fragments);
+
+		memcpy(&crashk_fragments->entries, &old->entries, sizeof(struct crash_fragments_entry) * entry_num);
+		crashk_fragments->hdr.entry_num = entry_num;
+		crashk_fragments->hdr.container_size = container_size;
+		hdr = &crashk_fragments->hdr;
+	}
+
+	crashk_fragments->entries[hdr->entry_num].size = size;
+	crashk_fragments->entries[hdr->entry_num].paddr = paddr;
+	hdr->entry_num ++;
+
+	return 0;
+}
+
+int crash_increase_dynamic_memory(unsigned long new_size)
+{
+	int ret = 0, order;
+	unsigned long old_size = 0, alloc, vstart;
+	unsigned long long paddr;
+	int size;
+
+	old_size = crash_get_dynamic_memory_size();
+
+	if (new_size < old_size) {
+		return -EINVAL;
+	}
+
+	if (kexec_crash_image) {
+		return -ENOENT;
+	}
+
+	mutex_lock(&kexec_mutex);
+	alloc = roundup(new_size - old_size, PAGE_SIZE);
+	while (alloc) {
+		pr_err("Pending alloc %ld\n", alloc);
+		/* Alloc the largest possible order smaller than allocation size */
+		order = get_order(alloc);
+		while ((PAGE_SIZE << order) > alloc)
+			order--;
+
+		vstart = 0;
+		while (order >= 0) {
+			vstart = __get_free_pages(GFP_KERNEL, order);
+			if (vstart)
+				break;
+			order --;
+		}
+
+		if (!vstart) {
+			ret = -ENOMEM;
+			goto unlock;
+		}
+		pr_err("Found page at %lx with order %d\n", __pa(vstart), order);
+
+		paddr = __pa(vstart);
+		size = PAGE_SIZE << order;
+		alloc -= size;
+
+		if (add_crash_fragment(paddr, size))
+			return -ENOMEM;
+	}
+
+unlock:
+	mutex_unlock(&kexec_mutex);
+	return ret;
+}
+
+static int __init kdump_crashk_fragments(char *arg)
+{
+	char *end;
+
+	if (!arg)
+		return -EINVAL;
+
+	crashk_fragments_kdump = memparse(arg, &end);
+	if (!crashk_fragments_kdump)
+		return -EINVAL;
+
+	return 0;
+}
+early_param("crash_fragment", kdump_crashk_fragments);
+
+static unsigned long long frag_paddr, frag_size;
+
+static void __frag_online_page(void)
+{
+	unsigned long long pfn;
+	struct page *pg;
+
+	pr_err("CB: actuall online page addr %llx - %llx\n", frag_paddr, frag_paddr + frag_size);
+	pr_err("CB: actuall online page vaddr %llx - %llx\n", __va(frag_paddr), __va(frag_paddr + frag_size));
+	pr_err("CB: actuall online pfn %ld - %ld\n", __phys_to_pfn(frag_paddr), __phys_to_pfn(frag_paddr + frag_size));
+
+	for (pfn = __phys_to_pfn(frag_paddr);
+			pfn < __phys_to_pfn(frag_paddr + frag_size);
+			pfn ++)
+	{
+		pg = pfn_to_page(pfn);
+
+		// kernel_map_pages(pg, 1, 1);
+
+		if (!kern_addr_valid(__va(__pfn_to_phys(pfn)))) {
+			pr_err("CB: Ignore overlapeed pfn %ld\n", pfn);
+			continue;
+		}
+
+		if (PageReserved(pg))
+			__ClearPageReserved(pg);
+
+		__online_page_set_limits(pg);
+		__online_page_increment_counters(pg);
+		__online_page_free(pg);
+
+		set_pageblock_migratetype(pg, MIGRATE_UNMOVABLE);
+	}
+}
+
+static void frag_online_page(struct page *pg, unsigned int order)
+{
+	unsigned long start_pfn = page_to_pfn(pg);
+	unsigned long nr_page = 1UL << order;
+	unsigned long i;
+
+	pr_err("CB: online region range addr %llx - %llx\n", __pfn_to_phys(start_pfn), __pfn_to_phys(start_pfn) + nr_page * PAGE_SIZE);
+
+	for (i = 0; i < nr_page; i++) {
+		pg = pfn_to_page(start_pfn + i);
+		__SetPageReserved(pg);
+	}
+}
+
+int __init parse_crashk_fragments(void) {
+	struct crash_fragments_entry *frag, *old;
+	struct crash_fragments_hdr hdr;
+	struct page *pg;
+	u64 addr;
+	int i;
+	unsigned long long vstart;
+
+	if (!crashk_fragments_kdump)
+		return 0;
+
+	addr = crashk_fragments_kdump;
+
+	pr_err("DEBUG !!!!!!!!!!!!!!!!!!!!!!!!\n");
+	pr_err("Fragment head %llx\n", addr);
+
+	read_from_oldmem((char*)&hdr,
+			 sizeof(struct crash_fragments_hdr),
+			 &addr, 0, false);
+	pr_err("Found fragment %d, %d\n", hdr.entry_num, hdr.container_size);
+
+	pr_err("Loading %d fragment records at %llx\n", hdr.entry_num, addr);
+	frag = kzalloc(GFP_KERNEL, sizeof(struct crash_fragments_entry) * hdr.container_size);
+	if (!frag) {
+		pr_err("!!!!!!!!!!!!! OOM !!!!!!!!!!!!!!!!\n");
+		return -ENOMEM;
+	}
+
+	addr = crashk_fragments_kdump + sizeof(struct crash_fragments_hdr);
+	read_from_oldmem((char*)frag, sizeof(struct crash_fragments_entry) * hdr.container_size,
+			 &addr, 0, false);
+
+	old = frag;
+	set_online_page_callback(&frag_online_page);
+
+	for (i = 0; i < hdr.entry_num; i++) {
+		unsigned long long pfn, align_start, align_end, align_size;
+		unsigned long long paddr, size, nr_pages, count, nid;
+		unsigned long flags;
+
+		local_irq_save(flags);
+
+		frag_paddr = paddr = frag->paddr;
+		frag_size = size = frag->size;
+
+		pfn = __phys_to_pfn(frag->paddr);
+		nr_pages = frag->size / PAGE_SIZE;
+		frag ++;
+
+		align_size = memory_block_size_bytes();
+		align_start = rounddown(paddr, align_size);
+		align_end = roundup(paddr + size, align_size);
+
+		if (!online_section_nr(pfn_to_section_nr(pfn))) {
+			pr_err("new region %llx - %llx\n", paddr, paddr + size);
+			nid = memory_add_physaddr_to_nid(PFN_PHYS(paddr));
+			add_memory(nid, align_start, align_size);
+		} else {
+			pr_err("online page %llx - %llx\n", paddr, paddr + size);
+		}
+		__frag_online_page();
+		local_irq_restore(flags);
+	}
+
+	vstart = __get_free_pages(GFP_KERNEL, 0);
+	free_page(vstart);
+
+	pg = virt_to_page(vstart);
+	pr_err("Alloc %llx\n", __pa(vstart));
+	pr_err("Type %x\n", pg->page_type);
+	pr_err("Active %x\n", pg->active);
+	pr_err("Units %x\n", pg->units);
+	dump_page(virt_to_page(vstart), "ALLOC KERNEL PAGE");
+
+	pr_err("Last %llx\n", (frag - 1)->paddr + PAGE_SIZE);
+	pg = pfn_to_page(__phys_to_pfn((frag - 1)->paddr + PAGE_SIZE));
+	pr_err("Type %x\n", pg->page_type);
+	pr_err("Active %x\n", pg->active);
+	pr_err("Units %x\n", pg->units);
+
+	dump_page(virt_to_page(vstart), "ALLOC KERNEL PAGE");
+	dump_page(pfn_to_page(__phys_to_pfn((frag - 1)->paddr)), "NEW ADDED PAGE");
+
+	dump_page(pfn_to_page(__phys_to_pfn((frag - 1)->paddr + PAGE_SIZE)), "NEW ADDED PAGE");
+
+	kfree(old);
+	restore_online_page_callback(&frag_online_page);
+
+	return 0;
+}
+subsys_initcall(parse_crashk_fragments)
+
+// struct resource res = {};
+// int i;
+
+// res = kzalloc(sizeof(*res), GFP_KERNEL);
+// if (!res)
+// 	return NULL;
+
+// res->name = "System RAM";
+// res->flags = IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY;
+// res->start =

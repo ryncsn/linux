@@ -123,6 +123,27 @@ static ssize_t kexec_crash_size_store(struct kobject *kobj,
 }
 KERNEL_ATTR_RW(kexec_crash_size);
 
+static ssize_t kexec_crash_dynamic_size_show(struct kobject *kobj,
+				       struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%zu\n", crash_get_dynamic_memory_size());
+}
+
+static ssize_t kexec_crash_dynamic_size_store(struct kobject *kobj,
+				   struct kobj_attribute *attr,
+				   const char *buf, size_t count)
+{
+	unsigned long cnt;
+	int ret;
+
+	if (kstrtoul(buf, 0, &cnt))
+		return -EINVAL;
+
+	pr_err("Adjusting dynamic size\n");
+	ret = crash_increase_dynamic_memory(cnt);
+	return ret < 0 ? ret : count;
+}
+KERNEL_ATTR_RW(kexec_crash_dynamic_size);
 #endif /* CONFIG_KEXEC_CORE */
 
 #ifdef CONFIG_CRASH_CORE
@@ -135,6 +156,14 @@ static ssize_t vmcoreinfo_show(struct kobject *kobj,
 			(unsigned int)VMCOREINFO_NOTE_SIZE);
 }
 KERNEL_ATTR_RO(vmcoreinfo);
+
+static ssize_t kexec_crash_dynamic_addr_show(struct kobject *kobj,
+			       struct kobj_attribute *attr, char *buf)
+{
+	phys_addr_t vmcore_base = paddr_crashk_fragments();
+	return sprintf(buf, "%pa\n", &vmcore_base);
+}
+KERNEL_ATTR_RO(kexec_crash_dynamic_addr);
 
 #endif /* CONFIG_CRASH_CORE */
 
@@ -221,9 +250,11 @@ static struct attribute * kernel_attrs[] = {
 	&kexec_loaded_attr.attr,
 	&kexec_crash_loaded_attr.attr,
 	&kexec_crash_size_attr.attr,
+	&kexec_crash_dynamic_size_attr.attr,
 #endif
 #ifdef CONFIG_CRASH_CORE
 	&vmcoreinfo_attr.attr,
+	&kexec_crash_dynamic_addr_attr.attr,
 #endif
 #ifndef CONFIG_TINY_RCU
 	&rcu_expedited_attr.attr,
