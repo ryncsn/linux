@@ -66,25 +66,25 @@ static size_t vmcoredd_orig_sz;
  * Returns > 0 for RAM pages, 0 for non-RAM pages, < 0 on error
  * The called function has to take care of module refcounting.
  */
-static int (*oldmem_pfn_is_ram)(unsigned long pfn);
+static int (*oldmem_pfn_is_ram_fn)(unsigned long pfn);
 
 int register_oldmem_pfn_is_ram(int (*fn)(unsigned long pfn))
 {
-	if (oldmem_pfn_is_ram)
+	if (oldmem_pfn_is_ram_fn)
 		return -EBUSY;
-	oldmem_pfn_is_ram = fn;
+	oldmem_pfn_is_ram_fn = fn;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(register_oldmem_pfn_is_ram);
 
 void unregister_oldmem_pfn_is_ram(void)
 {
-	oldmem_pfn_is_ram = NULL;
+	oldmem_pfn_is_ram_fn = NULL;
 	wmb();
 }
 EXPORT_SYMBOL_GPL(unregister_oldmem_pfn_is_ram);
 
-static int pfn_is_ram(unsigned long pfn)
+int oldmem_pfn_is_ram(unsigned long pfn)
 {
 	int (*fn)(unsigned long pfn);
 	/* pfn is ram unless fn() checks pagetype */
@@ -95,7 +95,7 @@ static int pfn_is_ram(unsigned long pfn)
 	 * A ballooned page contains no data and reading from such a page
 	 * will cause high load in the hypervisor.
 	 */
-	fn = oldmem_pfn_is_ram;
+	fn = oldmem_pfn_is_ram_fn;
 	if (fn)
 		ret = fn(pfn);
 
@@ -124,7 +124,7 @@ ssize_t read_from_oldmem(char *buf, size_t count,
 			nr_bytes = count;
 
 		/* If pfn is not ram, return zeros for sparse dump files */
-		if (pfn_is_ram(pfn) == 0)
+		if (oldmem_pfn_is_ram(pfn) == 0)
 			memset(buf, 0, nr_bytes);
 		else {
 			if (encrypted)
@@ -496,7 +496,7 @@ static int remap_oldmem_pfn_checked(struct vm_area_struct *vma,
 	pos_end = pfn + (size >> PAGE_SHIFT);
 
 	for (pos = pos_start; pos < pos_end; ++pos) {
-		if (!pfn_is_ram(pos)) {
+		if (!oldmem_pfn_is_ram(pos)) {
 			/*
 			 * We hit a page which is not ram. Remap the continuous
 			 * region between pos_start and pos-1 and replace
@@ -541,7 +541,7 @@ static int vmcore_remap_oldmem_pfn(struct vm_area_struct *vma,
 	 * Check if oldmem_pfn_is_ram was registered to avoid
 	 * looping over all pages without a reason.
 	 */
-	if (oldmem_pfn_is_ram)
+	if (oldmem_pfn_is_ram_fn)
 		return remap_oldmem_pfn_checked(vma, from, pfn, size, prot);
 	else
 		return remap_oldmem_pfn_range(vma, from, pfn, size, prot);

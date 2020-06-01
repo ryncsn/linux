@@ -93,6 +93,7 @@ static inline void vmcore_unusable(void)
 #define HAVE_OLDMEM_PFN_IS_RAM 1
 extern int register_oldmem_pfn_is_ram(int (*fn)(unsigned long pfn));
 extern void unregister_oldmem_pfn_is_ram(void);
+extern int oldmem_pfn_is_ram(unsigned long pfn);
 
 #else /* !CONFIG_CRASH_DUMP */
 static inline bool is_kdump_kernel(void) { return 0; }
