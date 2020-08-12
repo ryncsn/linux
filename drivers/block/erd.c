@@ -113,6 +113,12 @@ static int __init erd_init(void)
 	int ret;
 	struct request_queue *queue;
 
+	erd_major = register_blkdev(0, "crash-swap");
+	if (erd_major <= 0) {
+		pr_err("Unable to get major number\n");
+		return -EBUSY;
+	}
+
 	/* Only one disk supported */
 	queue = blk_alloc_queue(NUMA_NO_NODE);
 	if (!queue) {
@@ -134,9 +140,6 @@ static int __init erd_init(void)
 	erd_disk->fops = &erd_devops;
 	erd_disk->queue = queue;
 	snprintf(erd_disk->disk_name, 16, "erd");
-
-	/* Actual capacity is updated dynamically */
-	set_capacity(erd_disk, 0);
 
 	/* It's non-rotational disks */
 	blk_queue_flag_set(QUEUE_FLAG_NONROT, erd_disk->queue);
