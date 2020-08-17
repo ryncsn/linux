@@ -40,16 +40,16 @@ static int erd_do_bvec(struct page *page,
 			sector_t sector)
 {
 	void *mem;
-	unsigned long offset;
-	offset = sector << SECTOR_SHIFT;
-
-	BUG_ON(offset > erd_size);
+	unsigned long start, end;
+	start = sector << SECTOR_SHIFT;
+	end = min(start + len, erd_size);
+	BUG_ON(start > erd_size);
 
 	mem = kmap_atomic(page);
 	if (!op_is_write(op)) {
-		memcpy(mem + off, initrd_mem + offset, len);
+		memcpy(mem + off, initrd_mem + start, end - start);
 	} else {
-		memcpy(initrd_mem + offset, mem + off, len);
+		memcpy(initrd_mem + start, mem + off, end - start);
 	}
 	kunmap_atomic(mem);
 
@@ -160,10 +160,10 @@ static int __init erd_init(void)
 	initrd_mem = initrd_start;
 	erd_size = initrd_end - initrd_start;
 
-	set_capacity(erd_disk, erd_size >> SECTOR_SHIFT);
+	set_capacity(erd_disk, DIV_ROUND_UP(erd_size, SECTOR_SIZE));
 	revalidate_disk(erd_disk);
 
-	pr_info("Crash swap started\n");
+	pr_info("DEBUG: erd, size %lu\n", erd_size);
 	return 0;
 
 out_free_queue:

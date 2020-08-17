@@ -29,6 +29,7 @@
 #include "do_mounts.h"
 
 int root_mountflags = MS_RDONLY | MS_SILENT;
+static int use_overlay_rw;
 static char * __initdata root_device_name;
 static char __initdata saved_root_name[64];
 static int root_wait;
@@ -58,8 +59,15 @@ static int __init readwrite(char *str)
 	return 1;
 }
 
+static int __init overlay_rw(char *str)
+{
+	use_overlay_rw = 1;
+	return 0;
+}
+
 __setup("ro", readonly);
 __setup("rw", readwrite);
+__setup("overlay_rw", overlay_rw);
 
 #ifdef CONFIG_BLOCK
 struct uuidcmp {
@@ -551,6 +559,17 @@ static int __init mount_cifs_root(void)
 }
 #endif
 
+static int __init mount_overlay_root(void)
+{
+	int err;
+
+	err = do_mount_root("overlay", "overlay", 0, "lowerdir=/,upperdir=/,workdir=/");
+	if (err == 0)
+		return 1;
+
+	return 0;
+}
+
 void __init mount_root(void)
 {
 #ifdef CONFIG_ROOT_NFS
@@ -576,6 +595,11 @@ void __init mount_root(void)
 		mount_block_root("/dev/root", root_mountflags);
 	}
 #endif
+	if (use_overlay_rw) {
+		if (!mount_overlay_root())
+			printk(KERN_ERR "VFS: Unable to mount overlay.\n");
+	}
+	return;
 }
 
 /*
