@@ -444,6 +444,61 @@ static ssize_t read_vmcore(struct file *file, char __user *buffer,
 }
 
 /*
+ * Write to the old memory region, overriding ELF headers is not allowed.
+ * On error, negative value is returned otherwise number of bytes wrote
+ * are returned.
+ */
+static ssize_t __write_vmcore(char *buffer, size_t buflen, loff_t *fpos,
+			     int userbuf)
+{
+	ssize_t acc = 0, tmp;
+	size_t tsz;
+	u64 start;
+	struct vmcore *m = NULL;
+
+	if (buflen == 0 || *fpos >= vmcore_size)
+		return 0;
+
+	/* trim buflen to not go beyond EOF */
+	if (buflen > vmcore_size - *fpos)
+		buflen = vmcore_size - *fpos;
+
+	/* Deny writing to ELF headers */
+	if (*fpos < elfcorebuf_sz + elfnotes_sz)
+		return -EPERM;
+
+	list_for_each_entry(m, &vmcore_list, list) {
+		if (*fpos < m->offset + m->size) {
+			tsz = (size_t)min_t(unsigned long long,
+					    m->offset + m->size - *fpos,
+					    buflen);
+			start = m->paddr + *fpos - m->offset;
+			tmp = write_to_oldmem(buffer, tsz, &start,
+					      userbuf, mem_encrypt_active());
+			if (tmp < 0)
+				return tmp;
+			buflen -= tsz;
+			*fpos += tsz;
+			buffer += tsz;
+			acc += tsz;
+
+			/* leave now if filled buffer already */
+			if (buflen == 0)
+				return acc;
+		}
+	}
+
+	return acc;
+}
+
+
+static ssize_t write_vmcore(struct file *file, const char __user *buffer,
+			   size_t buflen, loff_t *fpos)
+{
+	return __write_vmcore((__force char *) buffer, buflen, fpos, 1);
+}
+
+/*
  * The vmcore fault handler uses the page cache and fills data using the
  * standard __vmcore_read() function.
  *
@@ -711,6 +766,7 @@ static int mmap_vmcore(struct file *file, struct vm_area_struct *vma)
 
 static const struct proc_ops vmcore_proc_ops = {
 	.proc_read	= read_vmcore,
+	.proc_write	= write_vmcore,
 	.proc_lseek	= default_llseek,
 	.proc_mmap	= mmap_vmcore,
 };
