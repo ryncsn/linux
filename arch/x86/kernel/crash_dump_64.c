@@ -13,7 +13,7 @@
 
 static ssize_t __copy_oldmem_page(unsigned long pfn, char *buf, size_t csize,
 				  unsigned long offset, int userbuf,
-				  bool encrypted)
+				  bool encrypted, bool is_write)
 {
 	void  *vaddr;
 
@@ -28,13 +28,25 @@ static ssize_t __copy_oldmem_page(unsigned long pfn, char *buf, size_t csize,
 	if (!vaddr)
 		return -ENOMEM;
 
-	if (userbuf) {
-		if (copy_to_user((void __user *)buf, vaddr + offset, csize)) {
-			iounmap((void __iomem *)vaddr);
-			return -EFAULT;
+	if (is_write) {
+		if (userbuf) {
+			if (copy_from_user(vaddr + offset, (void __user *)buf, csize)) {
+				iounmap((void __iomem *)vaddr);
+				return -EFAULT;
+			}
+		} else {
+			memcpy(vaddr + offset, buf, csize);
 		}
-	} else
-		memcpy(buf, vaddr + offset, csize);
+	} else {
+		if (userbuf) {
+			if (copy_to_user((void __user *)buf, vaddr + offset, csize)) {
+				iounmap((void __iomem *)vaddr);
+				return -EFAULT;
+			}
+		} else {
+			memcpy(buf, vaddr + offset, csize);
+		}
+	}
 
 	set_iounmap_nonlazy();
 	iounmap((void __iomem *)vaddr);
@@ -57,7 +69,7 @@ static ssize_t __copy_oldmem_page(unsigned long pfn, char *buf, size_t csize,
 ssize_t copy_oldmem_page(unsigned long pfn, char *buf, size_t csize,
 			 unsigned long offset, int userbuf)
 {
-	return __copy_oldmem_page(pfn, buf, csize, offset, userbuf, false);
+	return __copy_oldmem_page(pfn, buf, csize, offset, userbuf, false, false);
 }
 
 /**
@@ -68,7 +80,26 @@ ssize_t copy_oldmem_page(unsigned long pfn, char *buf, size_t csize,
 ssize_t copy_oldmem_page_encrypted(unsigned long pfn, char *buf, size_t csize,
 				   unsigned long offset, int userbuf)
 {
-	return __copy_oldmem_page(pfn, buf, csize, offset, userbuf, true);
+	return __copy_oldmem_page(pfn, buf, csize, offset, userbuf, true, false);
+}
+
+/**
+ * copy_to_oldmem_page - similiar to copy_oldmem_page but in opposite direction.
+ */
+ssize_t copy_to_oldmem_page(unsigned long pfn, char *src, size_t csize,
+		unsigned long offset, int userbuf)
+{
+	return __copy_oldmem_page(pfn, src, csize, offset, userbuf, false, true);
+}
+
+/**
+ * copy_to_oldmem_page_encrypted - similiar to copy_oldmem_page_encrypted but
+ * in opposite direction.
+ */
+ssize_t copy_to_oldmem_page_encrypted(unsigned long pfn, char *src, size_t csize,
+		unsigned long offset, int userbuf)
+{
+	return __copy_oldmem_page(pfn, src, csize, offset, userbuf, true, true);
 }
 
 ssize_t elfcorehdr_read(char *buf, size_t count, u64 *ppos)
