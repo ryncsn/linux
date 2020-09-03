@@ -108,25 +108,19 @@ ssize_t read_from_oldmem(char *buf, size_t count,
 			 bool encrypted)
 {
 	unsigned long pfn, offset;
-	size_t nr_bytes;
-	ssize_t read = 0, tmp;
+	size_t nr_bytes, to_copy = count;
+	ssize_t tmp;
 
-	if (!count)
-		return 0;
-
-	offset = (unsigned long)(*ppos % PAGE_SIZE);
+	offset = (unsigned long)(*ppos & (PAGE_SIZE - 1));
 	pfn = (unsigned long)(*ppos / PAGE_SIZE);
 
-	do {
-		if (count > (PAGE_SIZE - offset))
-			nr_bytes = PAGE_SIZE - offset;
-		else
-			nr_bytes = count;
+	while (to_copy) {
+		nr_bytes = min(to_copy, PAGE_SIZE - offset);
 
 		/* If pfn is not ram, return zeros for sparse dump files */
-		if (pfn_is_ram(pfn) == 0)
+		if (pfn_is_ram(pfn) == 0) {
 			memset(buf, 0, nr_bytes);
-		else {
+		} else {
 			if (encrypted)
 				tmp = copy_oldmem_page_encrypted(pfn, buf,
 								 nr_bytes,
@@ -140,14 +134,13 @@ ssize_t read_from_oldmem(char *buf, size_t count,
 				return tmp;
 		}
 		*ppos += nr_bytes;
-		count -= nr_bytes;
 		buf += nr_bytes;
-		read += nr_bytes;
+		to_copy -= nr_bytes;
 		++pfn;
 		offset = 0;
-	} while (count);
+	}
 
-	return read;
+	return count;
 }
 
 /*
