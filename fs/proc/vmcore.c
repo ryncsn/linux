@@ -103,9 +103,9 @@ static int pfn_is_ram(unsigned long pfn)
 }
 
 /* Reads a page from the oldmem device from given offset. */
-ssize_t read_from_oldmem(char *buf, size_t count,
-			 u64 *ppos, int userbuf,
-			 bool encrypted)
+static ssize_t oldmem_rw_page(char *buf, size_t count,
+			      u64 *ppos, int userbuf,
+			      bool encrypted, bool is_write)
 {
 	unsigned long pfn, offset;
 	size_t nr_bytes, to_copy = count;
@@ -119,20 +119,33 @@ ssize_t read_from_oldmem(char *buf, size_t count,
 
 		/* If pfn is not ram, return zeros for sparse dump files */
 		if (pfn_is_ram(pfn) == 0) {
-			memset(buf, 0, nr_bytes);
-		} else {
-			if (encrypted)
-				tmp = copy_oldmem_page_encrypted(pfn, buf,
-								 nr_bytes,
-								 offset,
-								 userbuf);
+			if (is_write)
+				return -EINVAL;
 			else
-				tmp = copy_oldmem_page(pfn, buf, nr_bytes,
-						       offset, userbuf);
+				memset(buf, 0, nr_bytes);
+		} else {
+			if (encrypted) {
+				tmp = is_write ?
+					copy_to_oldmem_page_encrypted(pfn, buf,
+							nr_bytes,
+							offset,
+							userbuf):
+					copy_oldmem_page_encrypted(pfn, buf,
+							nr_bytes,
+							offset,
+							userbuf);
+			} else {
+				tmp = is_write ?
+					copy_to_oldmem_page(pfn, buf, nr_bytes,
+						       offset, userbuf):
+					copy_oldmem_page(pfn, buf, nr_bytes,
+							offset, userbuf);
+			}
 
 			if (tmp < 0)
 				return tmp;
 		}
+
 		*ppos += nr_bytes;
 		buf += nr_bytes;
 		to_copy -= nr_bytes;
@@ -141,6 +154,22 @@ ssize_t read_from_oldmem(char *buf, size_t count,
 	}
 
 	return count;
+}
+
+/* Reads a page from the oldmem device from given offset. */
+ssize_t read_from_oldmem(char *buf, size_t count,
+			 u64 *ppos, int userbuf,
+			 bool encrypted)
+{
+	return oldmem_rw_page(buf, count, ppos, userbuf, encrypted, 0);
+}
+
+/* Writes a page to the oldmem device from given offset. */
+ssize_t write_to_oldmem(char *buf, size_t count,
+			u64 *ppos, int userbuf,
+			bool encrypted)
+{
+	return oldmem_rw_page(buf, count, ppos, userbuf, encrypted, 1);
 }
 
 /*
@@ -182,6 +211,26 @@ int __weak remap_oldmem_pfn_range(struct vm_area_struct *vma,
 {
 	prot = pgprot_encrypted(prot);
 	return remap_pfn_range(vma, from, pfn, size, prot);
+}
+
+/*
+ * Architectures which support writing to oldmem overrides this.
+ */
+ssize_t __weak
+copy_to_oldmem_page(unsigned long pfn, char *buf, size_t csize,
+			   unsigned long offset, int userbuf)
+{
+	return -EOPNOTSUPP;
+}
+
+/*
+ * Architectures which support memory encryption override this.
+ */
+ssize_t __weak
+copy_to_oldmem_page_encrypted(unsigned long pfn, char *buf, size_t csize,
+			   unsigned long offset, int userbuf)
+{
+	return copy_to_oldmem_page(pfn, buf, csize, offset, userbuf);
 }
 
 /*
