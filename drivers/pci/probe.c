@@ -1837,6 +1837,10 @@ int pci_setup_device(struct pci_dev *dev)
 	/* Early fixups, before probing the BARs */
 	pci_fixup_device(pci_fixup_early, dev);
 
+	/* Try stop DMA to avoid device ruining old memory even more */
+	if (reset_devices && !(class & (PCI_CLASS_DISPLAY_VGA | PCI_BASE_CLASS_BRIDGE)))
+		pci_clear_master(dev);
+
 	pci_info(dev, "[%04x:%04x] type %02x class %#08x\n",
 		 dev->vendor, dev->device, dev->hdr_type, dev->class);
 

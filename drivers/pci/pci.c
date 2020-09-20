@@ -2113,7 +2113,7 @@ static void __pci_set_master(struct pci_dev *dev, bool enable)
 	else
 		cmd = old_cmd & ~PCI_COMMAND_MASTER;
 	if (cmd != old_cmd) {
-		pci_dbg(dev, "%s bus mastering\n",
+		pci_err(dev, "%s bus mastering\n",
 			enable ? "enabling" : "disabling");
 		pci_write_config_word(dev, PCI_COMMAND, cmd);
 	}
@@ -4275,6 +4275,7 @@ EXPORT_SYMBOL(pci_set_master);
  */
 void pci_clear_master(struct pci_dev *dev)
 {
+	pr_err("DEBUG_KASONG: Cleaning master bit\n");
 	__pci_set_master(dev, false);
 }
 EXPORT_SYMBOL(pci_clear_master);
