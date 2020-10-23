@@ -20,6 +20,7 @@
 #include <linux/pci_ids.h>
 #include <linux/types.h>
 #include <linux/watchdog.h>
+#include <linux/crash_dump.h>
 #include <asm/nmi.h>
 
 #define HPWDT_VERSION			"2.0.3"
@@ -339,7 +340,12 @@ static int hpwdt_init_one(struct pci_dev *dev,
 		pretimeout = 0;
 	}
 	hpwdt_dev.pretimeout = pretimeout ? PRETIMEOUT_SEC : 0;
-	kdumptimeout = min(kdumptimeout, HPWDT_MAX_TIMER);
+	if (is_kdump_kernel()) {
+		dev_info(&dev->dev, "Running in kdump kernel, setting kdumptimeout to 0\n");
+		kdumptimeout = 0;
+	} else {
+		kdumptimeout = min(kdumptimeout, HPWDT_MAX_TIMER);
+	}
 
 	hpwdt_dev.parent = &dev->dev;
 	retval = watchdog_register_device(&hpwdt_dev);
