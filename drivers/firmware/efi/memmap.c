@@ -292,7 +292,7 @@ void __init efi_memmap_insert(struct efi_memory_map *old_memmap, void *buf,
 {
 	u64 m_start, m_end, m_attr;
 	efi_memory_desc_t *md;
-	u64 start, end;
+	u64 start, end, virt_offset;
 	void *old, *new;
 
 	/* modifying range */
@@ -321,6 +321,11 @@ void __init efi_memmap_insert(struct efi_memory_map *old_memmap, void *buf,
 		start = md->phys_addr;
 		end = md->phys_addr + (md->num_pages << EFI_PAGE_SHIFT) - 1;
 
+		if (md->virt_addr)
+			virt_offset = md->virt_addr - md->phys_addr;
+		else
+			virt_offset = -1;
+
 		if (m_start <= start && end <= m_end)
 			md->attribute |= m_attr;
 
@@ -337,6 +342,8 @@ void __init efi_memmap_insert(struct efi_memory_map *old_memmap, void *buf,
 			md->phys_addr = m_end + 1;
 			md->num_pages = (end - md->phys_addr + 1) >>
 				EFI_PAGE_SHIFT;
+			if (virt_offset != -1)
+				md->virt_addr = md->phys_addr + virt_offset;
 		}
 
 		if ((start < m_start && m_start < end) && m_end < end) {
@@ -351,6 +358,8 @@ void __init efi_memmap_insert(struct efi_memory_map *old_memmap, void *buf,
 			md->phys_addr = m_start;
 			md->num_pages = (m_end - m_start + 1) >>
 				EFI_PAGE_SHIFT;
+			if (virt_offset != -1)
+				md->virt_addr = md->phys_addr + virt_offset;
 			/* last part */
 			new += old_memmap->desc_size;
 			memcpy(new, old, old_memmap->desc_size);
@@ -358,6 +367,8 @@ void __init efi_memmap_insert(struct efi_memory_map *old_memmap, void *buf,
 			md->phys_addr = m_end + 1;
 			md->num_pages = (end - m_end) >>
 				EFI_PAGE_SHIFT;
+			if (virt_offset != -1)
+				md->virt_addr = md->phys_addr + virt_offset;
 		}
 
 		if ((start < m_start && m_start < end) &&
@@ -373,6 +384,8 @@ void __init efi_memmap_insert(struct efi_memory_map *old_memmap, void *buf,
 			md->num_pages = (end - md->phys_addr + 1) >>
 				EFI_PAGE_SHIFT;
 			md->attribute |= m_attr;
+			if (virt_offset != -1)
+				md->virt_addr = md->phys_addr + virt_offset;
 		}
 	}
 }
