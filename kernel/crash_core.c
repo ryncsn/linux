@@ -186,16 +186,17 @@ static int __init parse_crashkernel_suffix(char *cmdline,
 }
 
 static __init char *get_last_crashkernel(char *cmdline,
-			     const char *name,
-			     const char *suffix)
+					 const char *suffix)
 {
 	char *p = cmdline, *ck_cmdline = NULL;
 
 	/* find crashkernel and use the last one if there are more */
-	p = strstr(p, name);
+	p = strstr(p, "crashkernel");
 	while (p) {
-		char *end_p = strchr(p, ' ');
-		char *q;
+		char *end_p, *q;
+
+		p += sizeof("crashkernel");
+		end_p = strchr(p, ' ');
 
 		if (!end_p)
 			end_p = p + strlen(p);
@@ -217,7 +218,7 @@ static __init char *get_last_crashkernel(char *cmdline,
 				ck_cmdline = p;
 		}
 next:
-		p = strstr(p+1, name);
+		p = strstr(p+1, "crashkernel");
 	}
 
 	if (!ck_cmdline)
@@ -230,7 +231,6 @@ static int __init __parse_crashkernel(char *cmdline,
 			     unsigned long long system_ram,
 			     unsigned long long *crash_size,
 			     unsigned long long *crash_base,
-			     const char *name,
 			     const char *suffix)
 {
 	char	*first_colon, *first_space;
@@ -240,12 +240,10 @@ static int __init __parse_crashkernel(char *cmdline,
 	*crash_size = 0;
 	*crash_base = 0;
 
-	ck_cmdline = get_last_crashkernel(cmdline, name, suffix);
+	ck_cmdline = get_last_crashkernel(cmdline, suffix);
 
 	if (!ck_cmdline)
 		return -EINVAL;
-
-	ck_cmdline += strlen(name);
 
 	if (suffix)
 		return parse_crashkernel_suffix(ck_cmdline, crash_size,
@@ -272,8 +270,7 @@ int __init parse_crashkernel(char *cmdline,
 			     unsigned long long *crash_size,
 			     unsigned long long *crash_base)
 {
-	return __parse_crashkernel(cmdline, system_ram, crash_size, crash_base,
-					"crashkernel=", NULL);
+	return __parse_crashkernel(cmdline, system_ram, crash_size, crash_base, NULL);
 }
 
 int __init parse_crashkernel_high(char *cmdline,
@@ -281,8 +278,7 @@ int __init parse_crashkernel_high(char *cmdline,
 			     unsigned long long *crash_size,
 			     unsigned long long *crash_base)
 {
-	return __parse_crashkernel(cmdline, system_ram, crash_size, crash_base,
-				"crashkernel=", suffix_tbl[SUFFIX_HIGH]);
+	return __parse_crashkernel(cmdline, system_ram, crash_size, crash_base, suffix_tbl[SUFFIX_HIGH]);
 }
 
 int __init parse_crashkernel_low(char *cmdline,
@@ -290,8 +286,7 @@ int __init parse_crashkernel_low(char *cmdline,
 			     unsigned long long *crash_size,
 			     unsigned long long *crash_base)
 {
-	return __parse_crashkernel(cmdline, system_ram, crash_size, crash_base,
-				"crashkernel=", suffix_tbl[SUFFIX_LOW]);
+	return __parse_crashkernel(cmdline, system_ram, crash_size, crash_base, suffix_tbl[SUFFIX_LOW]);
 }
 
 Elf_Word *append_elf_note(Elf_Word *buf, char *name, unsigned int type,
