@@ -236,15 +236,12 @@ static int __init __parse_crashkernel(char *cmdline,
 			     unsigned long long *crash_base,
 			     enum crash_mem_type type)
 {
-	char	*first_colon, *first_space;
-	char	*ck_cmdline;
+	char *first_colon, *first_space;
+	char *ck_cmdline;
 
 	BUG_ON(!crash_size || !crash_base);
-	*crash_size = 0;
-	*crash_base = 0;
 
 	ck_cmdline = get_last_crashkernel(cmdline, suffix_tbl[type]);
-
 	if (!ck_cmdline)
 		return -EINVAL;
 
