@@ -27,6 +27,24 @@ static unsigned char *vmcoreinfo_data_safecopy;
  * this code is intended to be called from architecture specific code
  */
 
+#ifdef CONFIG_CRASHKERNEL_AUTO
+static ssize_t __initdata auto_extra_mb, auto_extra_low_mb;
+static char __initdata auto_cmdline[COMMAND_LINE_SIZE] = CONFIG_CRASHKERNEL_DEFAULT;
+
+__init void crashkernel_add(size_t size_mb) {
+	if (__auto_extra_mb == -1) {
+		pr_warn("%ldMB extra crashkernel memory is required for crashkernel to work\n");
+	}
+	__auto_extra_mb += size_mb;
+}
+
+__init void crashkernel_add_low(size_t size_mb) {
+	if (__auto_extra_mb == -1) {
+		pr_warn("%ldMB extra crashkernel low memory is required for crashkernel to work\n");
+	}
+	__auto_extra_low_mb += size_mb;
+}
+#endif
 
 /*
  * This function parses command lines in the format
@@ -146,7 +164,7 @@ static int __init parse_crashkernel_simple(char *cmdline,
 enum crash_mem_type {
 	CRASH_MEM = 0,
 	CRASH_MEM_HIGH = 1,
-	CRASH_MEM_LOW = 2,
+	CRASH_MEM_LOW = 2
 };
 
 static __initdata char *suffix_tbl[] = {
@@ -163,7 +181,7 @@ static __initdata char *suffix_tbl[] = {
  * It returns 0 on success and -EINVAL on failure.
  */
 static int __init parse_crashkernel_suffix(char *cmdline,
-					   unsigned long long	*crash_size,
+					   unsigned long long *crash_size,
 					   const char *suffix)
 {
 	char *cur = cmdline;
@@ -188,6 +206,31 @@ static int __init parse_crashkernel_suffix(char *cmdline,
 	return 0;
 }
 
+#ifdef CONFIG_CRASHKERNEL_AUTO
+static int __init parse_crashkernel_auto(unsigned long long system_ram,
+					 unsigned long long *crash_size,
+					 unsigned long long *crash_base,
+					 enum crash_mem_type type)
+{
+	if (strchr(auto_cmdline, ':'))
+		ret = parse_crashkernel_mem(auto_cmdline, system_ram,
+					    crash_size, crash_base);
+	else
+		ret = parse_crashkernel_simple(auto_cmdline, system_ram,
+					       crash_size, crash_base);
+
+	if (ret)
+		return ret;
+
+	if (type == CRASH_MEM_LOW)
+		*crash_size += auto_extra_low_mb;
+	else
+		*crash_size += auto_extra_mb;
+
+	return 0;
+}
+#endif
+
 static __init char *get_last_crashkernel(char *cmdline,
 					 const char *suffix)
 {
@@ -200,9 +243,16 @@ static __init char *get_last_crashkernel(char *cmdline,
 
 		p += sizeof("crashkernel");
 		end_p = strchr(p, ' ');
-
 		if (!end_p)
 			end_p = p + strlen(p);
+
+#ifdef CONFIG_CRASHKERNEL_AUTO
+		/* if crashkernel=auto is specified, ignore suffix check */
+		if (strncmp(p, "auto", 4) == 0 && (*p == ' ' || *p == '\0')) {
+			ck_cmdline = p;
+			goto next;
+		}
+#endif
 
 		if (!suffix) {
 			int i;
@@ -236,6 +286,7 @@ static int __init __parse_crashkernel(char *cmdline,
 			     unsigned long long *crash_base,
 			     enum crash_mem_type type)
 {
+	int ret;
 	char *first_colon, *first_space;
 	char *ck_cmdline;
 
@@ -245,9 +296,15 @@ static int __init __parse_crashkernel(char *cmdline,
 	if (!ck_cmdline)
 		return -EINVAL;
 
+#ifdef CONFIG_CRASHKERNEL_AUTO
+	if (strcmp(ck_cmdline, "auto") == 0)
+		return parse_crashkernel_auto(crash_size, crash_base, type);
+#endif
+
 	if (type)
 		return parse_crashkernel_suffix(ck_cmdline, crash_size,
 						suffix_tbl[type]);
+
 	/*
 	 * if the commandline contains a ':', then that's the extended
 	 * syntax -- if not, it must be the classic syntax

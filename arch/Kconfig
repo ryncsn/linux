@@ -21,6 +21,21 @@ config KEXEC_CORE
 config KEXEC_ELF
 	bool
 
+config CRASHKERNEL_AUTO
+	bool "Enable support for crashkernel=auto"
+	depends on CRASH_CORE
+	default n
+	help
+	  This option enables support for crashkernel=auto.
+
+config CRASHKERNEL_DEFAULT
+	string "Base crashkernel memory size reserved for kdump"
+	depends on CRASHKERNEL_AUTO
+	default ""
+	help
+	  This is base value for for kdump reserved memory size in MB.
+	  Will take effect when crashkernel=auto is used.
+
 config HAVE_IMA_KEXEC
 	bool
 
