@@ -218,7 +218,7 @@ static __init char *get_last_crashkernel(char *cmdline,
 				ck_cmdline = p;
 		}
 next:
-		p = strstr(p+1, "crashkernel");
+		p = strstr(end_p, "crashkernel");
 	}
 
 	if (!ck_cmdline)
