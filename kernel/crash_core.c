@@ -143,13 +143,16 @@ static int __init parse_crashkernel_simple(char *cmdline,
 	return 0;
 }
 
-#define SUFFIX_HIGH 0
-#define SUFFIX_LOW  1
-#define SUFFIX_NULL 2
+enum crash_mem_type {
+	CRASH_MEM = 0,
+	CRASH_MEM_HIGH = 1,
+	CRASH_MEM_LOW = 2,
+};
+
 static __initdata char *suffix_tbl[] = {
-	[SUFFIX_HIGH] = ",high",
-	[SUFFIX_LOW]  = ",low",
-	[SUFFIX_NULL] = NULL,
+	[CRASH_MEM_HIGH] = ",high",
+	[CRASH_MEM_LOW]  = ",low",
+	[CRASH_MEM] = NULL
 };
 
 /*
@@ -231,7 +234,7 @@ static int __init __parse_crashkernel(char *cmdline,
 			     unsigned long long system_ram,
 			     unsigned long long *crash_size,
 			     unsigned long long *crash_base,
-			     const char *suffix)
+			     enum crash_mem_type type)
 {
 	char	*first_colon, *first_space;
 	char	*ck_cmdline;
@@ -240,14 +243,14 @@ static int __init __parse_crashkernel(char *cmdline,
 	*crash_size = 0;
 	*crash_base = 0;
 
-	ck_cmdline = get_last_crashkernel(cmdline, suffix);
+	ck_cmdline = get_last_crashkernel(cmdline, suffix_tbl[type]);
 
 	if (!ck_cmdline)
 		return -EINVAL;
 
-	if (suffix)
+	if (type)
 		return parse_crashkernel_suffix(ck_cmdline, crash_size,
-				suffix);
+						suffix_tbl[type]);
 	/*
 	 * if the commandline contains a ':', then that's the extended
 	 * syntax -- if not, it must be the classic syntax
@@ -270,7 +273,7 @@ int __init parse_crashkernel(char *cmdline,
 			     unsigned long long *crash_size,
 			     unsigned long long *crash_base)
 {
-	return __parse_crashkernel(cmdline, system_ram, crash_size, crash_base, NULL);
+	return __parse_crashkernel(cmdline, system_ram, crash_size, crash_base, CRASH_MEM);
 }
 
 int __init parse_crashkernel_high(char *cmdline,
@@ -278,7 +281,7 @@ int __init parse_crashkernel_high(char *cmdline,
 			     unsigned long long *crash_size,
 			     unsigned long long *crash_base)
 {
-	return __parse_crashkernel(cmdline, system_ram, crash_size, crash_base, suffix_tbl[SUFFIX_HIGH]);
+	return __parse_crashkernel(cmdline, system_ram, crash_size, crash_base, CRASH_MEM_HIGH);
 }
 
 int __init parse_crashkernel_low(char *cmdline,
@@ -286,7 +289,7 @@ int __init parse_crashkernel_low(char *cmdline,
 			     unsigned long long *crash_size,
 			     unsigned long long *crash_base)
 {
-	return __parse_crashkernel(cmdline, system_ram, crash_size, crash_base, suffix_tbl[SUFFIX_LOW]);
+	return __parse_crashkernel(cmdline, system_ram, crash_size, crash_base, CRASH_MEM_LOW);
 }
 
 Elf_Word *append_elf_note(Elf_Word *buf, char *name, unsigned int type,
