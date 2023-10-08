@@ -175,6 +175,7 @@
 			 MEM_CGROUP_ID_SHIFT)
 #define EVICTION_BITS	(BITS_PER_LONG - (EVICTION_SHIFT))
 #define EVICTION_MASK	(~0UL >> EVICTION_SHIFT)
+#define LRU_GEN_EVICTION_BITS	(EVICTION_BITS - LRU_REFS_WIDTH - LRU_GEN_WIDTH)
 
 /*
  * Eviction timestamps need to be able to cover the full range of
@@ -185,6 +186,7 @@
  * evictions into coarser buckets by shaving off lower timestamp bits.
  */
 static unsigned int bucket_order __read_mostly;
+static unsigned int lru_gen_bucket_order __read_mostly;
 
 static void *pack_shadow(int memcgid, pg_data_t *pgdat, unsigned long eviction,
 			 bool workingset)
@@ -215,6 +217,47 @@ static void unpack_shadow(void *shadow, int *memcgidp, pg_data_t **pgdat,
 	*pgdat = NODE_DATA(nid);
 	*evictionp = entry;
 	*workingsetp = workingset;
+}
+
+static inline struct mem_cgroup *try_get_flush_memcg(int memcgid)
+{
+	struct mem_cgroup *memcg;
+
+	rcu_read_lock();
+
+	/*
+	 * Look up the memcg associated with the stored ID. It might
+	 * have been deleted since the folio's eviction.
+	 *
+	 * Note that in rare events the ID could have been recycled
+	 * for a new cgroup that refaults a shared folio. This is
+	 * impossible to tell from the available data. However, this
+	 * should be a rare and limited disturbance, and activations
+	 * are always speculative anyway. Ultimately, it's the aging
+	 * algorithm's job to shake out the minimum access frequency
+	 * for the active cache.
+	 *
+	 * XXX: On !CONFIG_MEMCG, this will always return NULL; it
+	 * would be better if the root_mem_cgroup existed in all
+	 * configurations instead.
+	 */
+	memcg = mem_cgroup_from_id(memcgid);
+	if (!mem_cgroup_disabled() &&
+	    (!memcg || !mem_cgroup_tryget(memcg))) {
+		rcu_read_unlock();
+		return NULL;
+	}
+
+	rcu_read_unlock();
+
+	/*
+	 * Flush stats (and potentially sleep) outside the RCU read section.
+	 * XXX: With per-memcg flushing and thresholding, is ratelimiting
+	 * still needed here?
+	 */
+	mem_cgroup_flush_stats_ratelimited(memcg);
+
+	return memcg;
 }
 
 /*
@@ -290,118 +333,6 @@ static inline bool lru_test_refault(struct mem_cgroup *memcg,
 			(file ? inactive_anon : inactive_file);
 }
 
-#ifdef CONFIG_LRU_GEN
-
-static void *lru_gen_eviction(struct folio *folio)
-{
-	int hist;
-	unsigned long token;
-	unsigned long min_seq;
-	struct lruvec *lruvec;
-	struct lru_gen_folio *lrugen;
-	int type = folio_is_file_lru(folio);
-	int delta = folio_nr_pages(folio);
-	int refs = folio_lru_refs(folio);
-	int tier = lru_tier_from_refs(refs);
-	struct mem_cgroup *memcg = folio_memcg(folio);
-	struct pglist_data *pgdat = folio_pgdat(folio);
-
-	BUILD_BUG_ON(LRU_GEN_WIDTH + LRU_REFS_WIDTH > BITS_PER_LONG - EVICTION_SHIFT);
-
-	lruvec = mem_cgroup_lruvec(memcg, pgdat);
-	lrugen = &lruvec->lrugen;
-	min_seq = READ_ONCE(lrugen->min_seq[type]);
-	token = (min_seq << LRU_REFS_WIDTH) | max(refs - 1, 0);
-
-	hist = lru_hist_from_seq(min_seq);
-	atomic_long_add(delta, &lrugen->evicted[hist][type][tier]);
-
-	return pack_shadow(mem_cgroup_id(memcg), pgdat, token, refs);
-}
-
-/*
- * Tests if the shadow entry is for a folio that was recently evicted.
- * Fills in @lruvec, @token, @workingset with the values unpacked from shadow.
- */
-static bool lru_gen_test_recent(struct lruvec *lruvec, bool file,
-				unsigned long token)
-{
-	unsigned long min_seq;
-
-	min_seq = READ_ONCE(lruvec->lrugen.min_seq[file]);
-	return (token >> LRU_REFS_WIDTH) == (min_seq & (EVICTION_MASK >> LRU_REFS_WIDTH));
-}
-
-static void lru_gen_refault(struct folio *folio, void *shadow)
-{
-	int memcgid;
-	bool recent;
-	int hist, tier, refs;
-	bool workingset;
-	unsigned long token;
-	struct lruvec *lruvec;
-	struct pglist_data *pgdat;
-	struct lru_gen_folio *lrugen;
-	int type = folio_is_file_lru(folio);
-	int delta = folio_nr_pages(folio);
-
-	rcu_read_lock();
-
-	unpack_shadow(shadow, &memcgid, &pgdat, &token, &workingset);
-	lruvec = mem_cgroup_lruvec(mem_cgroup_from_id(memcgid), pgdat);
-	if (lruvec != folio_lruvec(folio))
-		goto unlock;
-
-	mod_lruvec_state(lruvec, WORKINGSET_REFAULT_BASE + type, delta);
-
-	recent = lru_gen_test_recent(lruvec, type, token);
-	if (!recent)
-		goto unlock;
-
-	lrugen = &lruvec->lrugen;
-
-	hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
-	/* see the comment in folio_lru_refs() */
-	refs = (token & (BIT(LRU_REFS_WIDTH) - 1)) + workingset;
-	tier = lru_tier_from_refs(refs);
-
-	atomic_long_add(delta, &lrugen->refaulted[hist][type][tier]);
-	mod_lruvec_state(lruvec, WORKINGSET_ACTIVATE_BASE + type, delta);
-
-	/*
-	 * Count the following two cases as stalls:
-	 * 1. For pages accessed through page tables, hotter pages pushed out
-	 *    hot pages which refaulted immediately.
-	 * 2. For pages accessed multiple times through file descriptors,
-	 *    they would have been protected by sort_folio().
-	 */
-	if (lru_gen_in_fault() || refs >= BIT(LRU_REFS_WIDTH) - 1) {
-		set_mask_bits(&folio->flags, 0, LRU_REFS_MASK | BIT(PG_workingset));
-		mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
-	}
-unlock:
-	rcu_read_unlock();
-}
-
-#else /* !CONFIG_LRU_GEN */
-
-static void *lru_gen_eviction(struct folio *folio)
-{
-	return NULL;
-}
-
-static bool lru_gen_test_recent(struct lruvec *lruvec, bool file,
-				unsigned long token)
-{
-	return false;
-}
-
-static void lru_gen_refault(struct folio *folio, void *shadow)
-{
-}
-
-#endif /* CONFIG_LRU_GEN */
-
 /**
  * workingset_age_nonresident - age non-resident entries as LRU ages
  * @lruvec: the lruvec that was aged
@@ -429,6 +360,152 @@ void workingset_age_nonresident(struct lruvec *lruvec, unsigned long nr_pages)
 		atomic_long_add(nr_pages, &lruvec->nonresident_age);
 	} while ((lruvec = parent_lruvec(lruvec)));
 }
+
+#ifdef CONFIG_LRU_GEN
+
+static void *lru_gen_eviction(struct folio *folio)
+{
+	int hist;
+	unsigned long token;
+	unsigned long min_seq;
+	struct lruvec *lruvec;
+	struct lru_gen_folio *lrugen;
+	int type = folio_is_file_lru(folio);
+	int delta = folio_nr_pages(folio);
+	int refs = folio_lru_refs(folio);
+	int tier = lru_tier_from_refs(refs);
+	struct mem_cgroup *memcg = folio_memcg(folio);
+	struct pglist_data *pgdat = folio_pgdat(folio);
+
+	BUILD_BUG_ON(LRU_GEN_WIDTH + LRU_REFS_WIDTH > BITS_PER_LONG - EVICTION_SHIFT);
+
+	lruvec = mem_cgroup_lruvec(memcg, pgdat);
+	lrugen = &lruvec->lrugen;
+	min_seq = READ_ONCE(lrugen->min_seq[type]);
+	token = (min_seq << LRU_REFS_WIDTH) | max(refs - 1, 0);
+	token <<= LRU_GEN_EVICTION_BITS;
+	token |= lru_eviction(lruvec, LRU_GEN_EVICTION_BITS, lru_gen_bucket_order);
+
+	hist = lru_hist_from_seq(min_seq);
+	atomic_long_add(delta, &lrugen->evicted[hist][type][tier]);
+	workingset_age_nonresident(lruvec, delta);
+
+	return pack_shadow(mem_cgroup_id(memcg), pgdat, token, refs);
+}
+
+/*
+ * Tests if the shadow entry is for a folio that was recently evicted.
+ * Fills in @lruvec, @token, @workingset with the values unpacked from shadow.
+ */
+static bool lru_gen_test_recent(struct lruvec *lruvec, bool file,
+				unsigned long token)
+{
+	unsigned long min_seq;
+
+	min_seq = READ_ONCE(lruvec->lrugen.min_seq[file]);
+	token >>= LRU_GEN_EVICTION_BITS;
+	return (token >> LRU_REFS_WIDTH) == (min_seq & (EVICTION_MASK >> LRU_REFS_WIDTH));
+}
+
+static void lru_gen_refault(struct folio *folio, void *shadow)
+{
+	int memcgid;
+	bool recent;
+	bool workingset;
+	unsigned long token;
+	int hist, tier, refs;
+	bool refault = false;
+	struct lruvec *lruvec;
+	struct mem_cgroup *memcg;
+	struct pglist_data *pgdat;
+	struct lru_gen_folio *lrugen;
+	int type = folio_is_file_lru(folio);
+	int delta = folio_nr_pages(folio);
+
+	unpack_shadow(shadow, &memcgid, &pgdat, &token, &workingset);
+	memcg = try_get_flush_memcg(memcgid);
+	lruvec = mem_cgroup_lruvec(memcg, pgdat);
+	if (lruvec != folio_lruvec(folio))
+		goto unlock;
+
+	mod_lruvec_state(lruvec, WORKINGSET_REFAULT_BASE + type, delta);
+
+	recent = lru_gen_test_recent(lruvec, type, token);
+	refault = lru_test_refault(lruvec_memcg(lruvec), lruvec, token, true,
+			LRU_GEN_EVICTION_BITS, lru_gen_bucket_order);
+	if (!recent && !refault)
+		goto unlock;
+
+	mod_lruvec_state(lruvec, WORKINGSET_ACTIVATE_BASE + type, delta);
+	/* see the comment in folio_lru_refs() */
+	token >>= LRU_GEN_EVICTION_BITS;
+	refs = (token & (BIT(LRU_REFS_WIDTH) - 1)) + workingset;
+
+	/*
+	 * Count the following two cases as stalls:
+	 * 1. For pages accessed through page tables, hotter pages pushed out
+	 *    hot pages which refaulted immediately.
+	 * 2. For pages accessed multiple times through file descriptors,
+	 *    they would have been protected by sort_folio().
+	 * 3. For pages considered a refautl according to distance checking.
+	 */
+	if (lru_gen_in_fault() || refs >= BIT(LRU_REFS_WIDTH) - 1 || refault) {
+		set_mask_bits(&folio->flags, 0, LRU_REFS_MASK | BIT(PG_workingset));
+		mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
+	}
+
+	if (refault) {
+		/* Re-activate a page only if it's referenced for at least once */
+		if (refs)
+			folio_set_active(folio);
+
+		/*
+		 * Protect higher tier:
+		 * - Refauled page are expected to be accessed for at least one more
+		 *   time than it's last eviction, so if it's not stalling it should
+		 *   end up in higher tier.
+		 * - This help using lower tier to protect refaulting higher tier.
+		 */
+		if (refs < BIT(LRU_REFS_WIDTH) - 1)
+			refs += 1;
+	}
+
+	lrugen = &lruvec->lrugen;
+	hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
+	tier = lru_tier_from_refs(refs);
+
+	/*
+	 * If recent is false, add to global PID counters since the gen which
+	 * the page evicted is gone already, also be more soft about the PID feedback.
+	 */
+	if (recent) {
+		atomic_long_add(delta, &lrugen->refaulted[hist][type][tier]);
+	} else {
+		atomic_long_add(delta, &lrugen->avg_total[type][tier]);
+		atomic_long_add(delta, &lrugen->avg_refaulted[type][tier]);
+	}
+unlock:
+	mem_cgroup_put(memcg);
+}
+
+#else /* !CONFIG_LRU_GEN */
+
+static void *lru_gen_eviction(struct folio *folio)
+{
+	return NULL;
+}
+
+static bool lru_gen_test_recent(struct lruvec *lruvec, bool file,
+				unsigned long token)
+{
+	return false;
+}
+
+static void lru_gen_refault(struct folio *folio, void *shadow)
+{
+}
+
+#endif /* CONFIG_LRU_GEN */
 
 /**
  * workingset_eviction - note the eviction of a folio from memory
@@ -482,42 +559,11 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset)
 	unsigned long eviction;
 	bool ret;
 
-	rcu_read_lock();
-
 	unpack_shadow(shadow, &memcgid, &pgdat, &eviction, workingset);
 
-	/*
-	 * Look up the memcg associated with the stored ID. It might
-	 * have been deleted since the folio's eviction.
-	 *
-	 * Note that in rare events the ID could have been recycled
-	 * for a new cgroup that refaults a shared folio. This is
-	 * impossible to tell from the available data. However, this
-	 * should be a rare and limited disturbance, and activations
-	 * are always speculative anyway. Ultimately, it's the aging
-	 * algorithm's job to shake out the minimum access frequency
-	 * for the active cache.
-	 *
-	 * XXX: On !CONFIG_MEMCG, this will always return NULL; it
-	 * would be better if the root_mem_cgroup existed in all
-	 * configurations instead.
-	 */
-	eviction_memcg = mem_cgroup_from_id(memcgid);
-	if (!mem_cgroup_disabled() &&
-	    (!eviction_memcg || !mem_cgroup_tryget(eviction_memcg))) {
-		rcu_read_unlock();
+	eviction_memcg = try_get_flush_memcg(memcgid);
+	if (!eviction_memcg)
 		return false;
-	}
-
-	rcu_read_unlock();
-
-	/*
-	 * Flush stats (and potentially sleep) outside the RCU read section.
-	 * XXX: With per-memcg flushing and thresholding, is ratelimiting
-	 * still needed here?
-	 */
-	mem_cgroup_flush_stats_ratelimited(eviction_memcg);
-
 	eviction_lruvec = mem_cgroup_lruvec(eviction_memcg, pgdat);
 
 	if (lru_gen_enabled())
@@ -549,11 +595,6 @@ void workingset_refault(struct folio *folio, void *shadow)
 	bool workingset;
 	long nr;
 
-	if (lru_gen_enabled()) {
-		lru_gen_refault(folio, shadow);
-		return;
-	}
-
 	/*
 	 * The activation decision for this folio is made at the level
 	 * where the eviction occurred, as that is where the LRU order
@@ -564,6 +605,12 @@ void workingset_refault(struct folio *folio, void *shadow)
 	 * locked to guarantee folio_memcg() stability throughout.
 	 */
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+
+	if (lru_gen_enabled()) {
+		lru_gen_refault(folio, shadow);
+		return;
+	}
+
 	nr = folio_nr_pages(folio);
 	memcg = folio_memcg(folio);
 	pgdat = folio_pgdat(folio);
@@ -793,6 +840,12 @@ static int __init workingset_init(void)
 		bucket_order = max_order - EVICTION_BITS;
 	pr_info("workingset: timestamp_bits=%d max_order=%d bucket_order=%u\n",
 		EVICTION_BITS, max_order, bucket_order);
+#ifdef CONFIG_LRU_GEN
+	if (max_order > LRU_GEN_EVICTION_BITS)
+		lru_gen_bucket_order = max_order - LRU_GEN_EVICTION_BITS;
+	pr_info("workingset: lru_gen_timestamp_bits=%d lru_gen_bucket_order=%u\n",
+		LRU_GEN_EVICTION_BITS, lru_gen_bucket_order);
+#endif
 
 	workingset_shadow_shrinker = shrinker_alloc(SHRINKER_NUMA_AWARE |
 						    SHRINKER_MEMCG_AWARE,
