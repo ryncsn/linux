@@ -170,9 +170,10 @@
  */
 
 #define WORKINGSET_SHIFT 1
-#define EVICTION_SHIFT	((BITS_PER_LONG - BITS_PER_XA_VALUE) +	\
+#define EVICTION_SHIFT	((BITS_PER_LONG - BITS_PER_XA_VALUE) + \
 			 WORKINGSET_SHIFT + NODES_SHIFT + \
 			 MEM_CGROUP_ID_SHIFT)
+#define EVICTION_BITS	(BITS_PER_LONG - (EVICTION_SHIFT))
 #define EVICTION_MASK	(~0UL >> EVICTION_SHIFT)
 
 /*
@@ -214,6 +215,72 @@ static void unpack_shadow(void *shadow, int *memcgidp, pg_data_t **pgdat,
 	*pgdat = NODE_DATA(nid);
 	*evictionp = entry;
 	*workingsetp = workingset;
+}
+
+/**
+ * workingset_age_nonresident - age non-resident entries as LRU ages
+ * @lruvec: the lruvec that was aged
+ * @nr_pages: the number of pages to count
+ *
+ * As in-memory pages are aged, non-resident pages need to be aged as
+ * well, in order for the refault distances later on to be comparable
+ * to the in-memory dimensions. This function allows reclaim and LRU
+ * operations to drive the non-resident aging along in parallel.
+ */
+static inline unsigned long lru_eviction(struct lruvec *lruvec, int nr_pages,
+					 int bits, int bucket_order)
+{
+	unsigned long eviction;
+
+	/*
+	 * Reclaiming a cgroup means reclaiming all its children in a
+	 * round-robin fashion. That means that each cgroup has an LRU
+	 * order that is composed of the LRU orders of its child
+	 * cgroups; and every page has an LRU position not just in the
+	 * cgroup that owns it, but in all of that group's ancestors.
+	 *
+	 * So when the physical inactive list of a leaf cgroup ages,
+	 * the virtual inactive lists of all its parents, including
+	 * the root cgroup's, age as well.
+	 */
+	eviction = atomic_long_fetch_add_relaxed(nr_pages, &lruvec->nonresident_age);
+	while ((lruvec = parent_lruvec(lruvec)))
+		atomic_long_add(nr_pages, &lruvec->nonresident_age);
+
+	/* Truncate the timestamp to fit in limited bits */
+	eviction >>= bucket_order;
+	eviction &= ~0UL >> (BITS_PER_LONG - bits);
+	return eviction;
+}
+
+/*
+ * Calculate and test refault distance.
+ */
+static inline unsigned long lru_distance(struct mem_cgroup *memcg,
+					 struct lruvec *lruvec,
+					 unsigned long eviction, bool file,
+					 int bits, int bucket_order)
+{
+	unsigned long refault;
+
+	eviction <<= bucket_order;
+	refault = atomic_long_read(&lruvec->nonresident_age);
+
+	/*
+	 * The unsigned subtraction here gives an accurate distance
+	 * across nonresident_age overflows in most cases. There is a
+	 * special case: usually, shadow entries have a short lifetime
+	 * and are either refaulted or reclaimed along with the inode
+	 * before they get too old.  But it is not impossible for the
+	 * nonresident_age to lap a shadow entry in the field, which
+	 * can then result in a false small refault distance, leading
+	 * to a false activation should this old entry actually
+	 * refault again.  However, earlier kernels used to deactivate
+	 * unconditionally with *every* reclaim invocation for the
+	 * longest time, so the occasional inappropriate activation
+	 * leading to pressure on the active list is not a problem.
+	 */
+	 return (refault - eviction) & (~0UL >> (BITS_PER_LONG - bits));
 }
 
 #ifdef CONFIG_LRU_GEN
@@ -333,35 +400,6 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
 #endif /* CONFIG_LRU_GEN */
 
 /**
- * workingset_age_nonresident - age non-resident entries as LRU ages
- * @lruvec: the lruvec that was aged
- * @nr_pages: the number of pages to count
- *
- * As in-memory pages are aged, non-resident pages need to be aged as
- * well, in order for the refault distances later on to be comparable
- * to the in-memory dimensions. This function allows reclaim and LRU
- * operations to drive the non-resident aging along in parallel.
- */
-static long workingset_age_nonresident(struct lruvec *lruvec, unsigned long nr_pages)
-{
-	/*
-	 * Reclaiming a cgroup means reclaiming all its children in a
-	 * round-robin fashion. That means that each cgroup has an LRU
-	 * order that is composed of the LRU orders of its child
-	 * cgroups; and every page has an LRU position not just in the
-	 * cgroup that owns it, but in all of that group's ancestors.
-	 *
-	 * So when the physical inactive list of a leaf cgroup ages,
-	 * the virtual inactive lists of all its parents, including
-	 * the root cgroup's, age as well.
-	 */
-	eviction = atomic_long_fetch_add_relaxed(nr_pages, &lruvec->nonresident_age);
-	while ((lruvec = parent_lruvec(lruvec)))
-		atomic_long_add(nr_pages, &lruvec->nonresident_age);
-	return eviction;
-}
-
-/**
  * workingset_eviction - note the eviction of a folio from memory
  * @target_memcg: the cgroup that is causing the reclaim
  * @folio: the folio being evicted
@@ -387,10 +425,10 @@ void *workingset_eviction(struct folio *folio, struct mem_cgroup *target_memcg)
 	lruvec = mem_cgroup_lruvec(target_memcg, pgdat);
 	/* XXX: target_memcg can be NULL, go through lruvec */
 	memcgid = mem_cgroup_id(lruvec_memcg(lruvec));
-	eviction = workingset_age_nonresident(lruvec, folio_nr_pages(folio));
-	eviction >>= bucket_order;
+	eviction = lru_eviction(lruvec, folio_nr_pages(folio),
+				EVICTION_BITS, bucket_order);
 	return pack_shadow(memcgid, pgdat, eviction,
-				folio_test_workingset(folio));
+			   folio_test_workingset(folio));
 }
 
 /**
@@ -408,10 +446,9 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset)
 {
 	struct mem_cgroup *eviction_memcg;
 	struct lruvec *eviction_lruvec;
-	unsigned long refault_distance;
 	unsigned long inactive_file;
 	unsigned long inactive_anon;
-	unsigned long refault;
+	unsigned long distance;
 	unsigned long active;
 	int memcgid;
 	struct pglist_data *pgdat;
@@ -422,13 +459,11 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset)
 	if (lru_gen_enabled()) {
 		bool recent = lru_gen_test_recent(shadow, file,
 				&eviction_lruvec, &eviction, workingset);
-
 		rcu_read_unlock();
 		return recent;
 	}
 
 	unpack_shadow(shadow, &memcgid, &pgdat, &eviction, workingset);
-	eviction <<= bucket_order;
 
 	/*
 	 * Look up the memcg associated with the stored ID. It might
@@ -463,25 +498,8 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset)
 	mem_cgroup_flush_stats_ratelimited(eviction_memcg);
 
 	eviction_lruvec = mem_cgroup_lruvec(eviction_memcg, pgdat);
-	refault = atomic_long_read(&eviction_lruvec->nonresident_age);
-
-	/*
-	 * Calculate the refault distance
-	 *
-	 * The unsigned subtraction here gives an accurate distance
-	 * across nonresident_age overflows in most cases. There is a
-	 * special case: usually, shadow entries have a short lifetime
-	 * and are either refaulted or reclaimed along with the inode
-	 * before they get too old.  But it is not impossible for the
-	 * nonresident_age to lap a shadow entry in the field, which
-	 * can then result in a false small refault distance, leading
-	 * to a false activation should this old entry actually
-	 * refault again.  However, earlier kernels used to deactivate
-	 * unconditionally with *every* reclaim invocation for the
-	 * longest time, so the occasional inappropriate activation
-	 * leading to pressure on the active list is not a problem.
-	 */
-	refault_distance = (refault - eviction) & EVICTION_MASK;
+	distance = lru_distance(eviction_memcg, eviction_lruvec, eviction,
+				file, EVICTION_BITS, bucket_order);
 
 	/*
 	 * Compare the distance to the existing workingset size. We
@@ -495,13 +513,12 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset)
 
 	if (mem_cgroup_get_nr_swap_pages(eviction_memcg) > 0) {
 		active += lruvec_page_state(eviction_lruvec,
-						     NR_ACTIVE_ANON);
+					    NR_ACTIVE_ANON);
 		inactive_anon = lruvec_page_state(eviction_lruvec,
 						  NR_INACTIVE_ANON);
 	} else {
 		inactive_anon = 0;
 	}
-
 	mem_cgroup_put(eviction_memcg);
 
 	/*
@@ -510,9 +527,9 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset)
 	 * active pages with one time refaulted page may not be a good idea.
 	 */
 	if (active >= inactive_anon + inactive_file)
-		return refault_distance < inactive_anon + inactive_file;
+		return distance < inactive_anon + inactive_file;
 	else
-		return refault_distance < active + (file ? inactive_anon : inactive_file);
+		return distance < active + (file ? inactive_anon : inactive_file);
 }
 
 /**
