@@ -3095,12 +3095,55 @@ static int folio_update_gen(struct folio *folio, int gen)
 
 struct gen_update_batch {
 	int delta[MAX_NR_GENS][ANON_AND_FILE][MAX_NR_ZONES];
+	struct folio *head, *tail;
+	int bulk_gen, bulk_zone;
+	bool bulk_type;
 };
+
+static void inline lru_gen_update_bulk_finish(struct lru_gen_folio *lrugen,
+					      struct gen_update_batch *batch)
+{
+	if (!batch->head)
+		return;
+
+	list_bulk_move_tail(&lrugen->folios[batch->bulk_gen][batch->bulk_type][batch->bulk_zone],
+			    &batch->head->lru,
+			    &batch->tail->lru);
+
+	batch->head = NULL;
+}
+
+static void inline lru_gen_update_bulk(struct lru_gen_folio *lrugen, struct folio *folio,
+				       int gen, bool type, int zone, struct gen_update_batch *batch)
+{
+	if (!batch->head) {
+		batch->head = folio;
+		batch->tail = folio;
+		batch->bulk_gen = gen;
+		batch->bulk_type = type;
+		batch->bulk_zone = zone;
+		return;
+	}
+
+	if (batch->bulk_gen != gen || batch->bulk_type != type || \
+	    batch->bulk_zone != zone) {
+		lru_gen_update_bulk_finish(lrugen, batch);
+		batch->head = folio;
+		batch->tail = folio;
+		batch->bulk_gen = gen;
+		batch->bulk_type = type;
+		batch->bulk_zone = zone;
+	} else {
+		batch->head = folio;
+	}
+}
 
 static void lru_gen_update_batch(struct lruvec *lruvec, struct gen_update_batch *batch)
 {
 	int gen, type, zone;
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
+
+	lru_gen_update_bulk_finish(lrugen, batch);
 
 	for (type = 0; type < ANON_AND_FILE; type++) {
 		enum lru_list lru = type * LRU_INACTIVE_FILE;
@@ -3711,23 +3754,31 @@ static bool inc_min_seq(struct lruvec *lruvec, int type, bool can_swap)
 	/* prevent cold/hot inversion if force_scan is true */
 	for (zone = 0; zone < MAX_NR_ZONES; zone++) {
 		struct list_head *head = &lrugen->folios[old_gen][type][zone];
+		struct folio *prev = NULL;
 
-		while (!list_empty(head)) {
-			struct folio *folio = lru_to_folio(head);
+		if (!list_empty(head))
+			prev = lru_to_folio(head);
 
+		while (prev) {
+			struct folio *folio = prev;
 			VM_WARN_ON_ONCE_FOLIO(folio_test_unevictable(folio), folio);
 			VM_WARN_ON_ONCE_FOLIO(folio_test_active(folio), folio);
 			VM_WARN_ON_ONCE_FOLIO(folio_is_file_lru(folio) != type, folio);
 			VM_WARN_ON_ONCE_FOLIO(folio_zonenum(folio) != zone, folio);
 
+			if (unlikely(list_is_first(&folio->lru, head)))
+				prev = NULL;
+			else
+				prev = lru_to_folio(&folio->lru);
+
 			new_gen = folio_inc_gen(lruvec, folio, false, &batch);
-			list_move_tail(&folio->lru, &lrugen->folios[new_gen][type][zone]);
+			lru_gen_update_bulk(lrugen, folio, new_gen, type, zone, &batch);
 
 			if (!--remaining) {
 				lru_gen_update_batch(lruvec, &batch);
 				return false;
 			}
-		}
+		};
 	}
 done:
 	lru_gen_update_batch(lruvec, &batch);
@@ -4282,7 +4333,7 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
 		int hist = lru_hist_from_seq(lrugen->min_seq[type]);
 
 		gen = folio_inc_gen(lruvec, folio, false, batch);
-		list_move_tail(&folio->lru, &lrugen->folios[gen][type][zone]);
+		lru_gen_update_bulk(lrugen, folio, gen, type, zone, batch);
 
 		WRITE_ONCE(lrugen->protected[hist][type][tier - 1],
 			   lrugen->protected[hist][type][tier - 1] + delta);
@@ -4292,7 +4343,7 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
 	/* ineligible */
 	if (zone > sc->reclaim_idx || skip_cma(folio, sc)) {
 		gen = folio_inc_gen(lruvec, folio, false, batch);
-		list_move_tail(&folio->lru, &lrugen->folios[gen][type][zone]);
+		lru_gen_update_bulk(lrugen, folio, gen, type, zone, batch);
 		return true;
 	}
 
@@ -4368,9 +4419,13 @@ static int scan_folios(struct lruvec *lruvec, struct scan_control *sc,
 		int skipped_zone = 0;
 		int zone = (sc->reclaim_idx + i) % MAX_NR_ZONES;
 		struct list_head *head = &lrugen->folios[gen][type][zone];
+		struct folio *prev = NULL;
 
-		while (!list_empty(head)) {
-			struct folio *folio = lru_to_folio(head);
+		if (!list_empty(head))
+			prev = lru_to_folio(head);
+
+		while (prev) {
+			struct folio *folio = prev;
 			int delta = folio_nr_pages(folio);
 
 			VM_WARN_ON_ONCE_FOLIO(folio_test_unevictable(folio), folio);
@@ -4379,6 +4434,10 @@ static int scan_folios(struct lruvec *lruvec, struct scan_control *sc,
 			VM_WARN_ON_ONCE_FOLIO(folio_zonenum(folio) != zone, folio);
 
 			scanned += delta;
+			if (unlikely(list_is_first(&folio->lru, head)))
+				prev = NULL;
+			else
+				prev = lru_to_folio(&folio->lru);
 
 			if (sort_folio(lruvec, folio, sc, tier, &batch))
 				sorted += delta;
