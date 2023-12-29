@@ -218,7 +218,7 @@ static void unpack_shadow(void *shadow, int *memcgidp, pg_data_t **pgdat,
 }
 
 /**
- * workingset_age_nonresident - age non-resident entries as LRU ages
+ * lru_eviction - age non-resident entries as LRU ages
  * @lruvec: the lruvec that was aged
  * @nr_pages: the number of pages to count
  *
@@ -228,7 +228,7 @@ static void unpack_shadow(void *shadow, int *memcgidp, pg_data_t **pgdat,
  * operations to drive the non-resident aging along in parallel.
  */
 static inline unsigned long lru_eviction(struct lruvec *lruvec, int nr_pages,
-					 int bits, int bucket_order)
+					 bool type, int bits, int bucket_order)
 {
 	unsigned long eviction;
 
@@ -243,9 +243,9 @@ static inline unsigned long lru_eviction(struct lruvec *lruvec, int nr_pages,
 	 * the virtual inactive lists of all its parents, including
 	 * the root cgroup's, age as well.
 	 */
-	eviction = atomic_long_fetch_add_relaxed(nr_pages, &lruvec->nonresident_age);
+	eviction = atomic_long_fetch_add_relaxed(nr_pages, &lruvec->eviction[type]);
 	while ((lruvec = parent_lruvec(lruvec)))
-		atomic_long_add(nr_pages, &lruvec->nonresident_age);
+		atomic_long_add(nr_pages, &lruvec->eviction[type]);
 
 	/* Truncate the timestamp to fit in limited bits */
 	eviction >>= bucket_order;
@@ -258,13 +258,13 @@ static inline unsigned long lru_eviction(struct lruvec *lruvec, int nr_pages,
  */
 static inline unsigned long lru_distance(struct mem_cgroup *memcg,
 					 struct lruvec *lruvec,
-					 unsigned long eviction, bool file,
+					 unsigned long eviction, bool type,
 					 int bits, int bucket_order)
 {
 	unsigned long refault;
 
 	eviction <<= bucket_order;
-	refault = atomic_long_read(&lruvec->nonresident_age);
+	refault = atomic_long_read(&lruvec->eviction[type]);
 
 	/*
 	 * The unsigned subtraction here gives an accurate distance
@@ -426,7 +426,7 @@ void *workingset_eviction(struct folio *folio, struct mem_cgroup *target_memcg)
 	/* XXX: target_memcg can be NULL, go through lruvec */
 	memcgid = mem_cgroup_id(lruvec_memcg(lruvec));
 	eviction = lru_eviction(lruvec, folio_nr_pages(folio),
-				EVICTION_BITS, bucket_order);
+				folio_is_file_lru(folio), EVICTION_BITS, bucket_order);
 	return pack_shadow(memcgid, pgdat, eviction,
 			   folio_test_workingset(folio));
 }
