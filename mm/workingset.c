@@ -316,42 +316,38 @@ static void *lru_gen_eviction(struct folio *folio)
  * Tests if the shadow entry is for a folio that was recently evicted.
  * Fills in @lruvec, @token, @workingset with the values unpacked from shadow.
  */
-static bool lru_gen_test_recent(void *shadow, bool file, struct lruvec **lruvec,
-				unsigned long *token, bool *workingset)
+static bool lru_gen_test_recent(struct lruvec *lruvec, bool file,
+				unsigned long token)
 {
-	int memcg_id;
 	unsigned long min_seq;
-	struct mem_cgroup *memcg;
-	struct pglist_data *pgdat;
 
-	unpack_shadow(shadow, &memcg_id, &pgdat, token, workingset);
-
-	memcg = mem_cgroup_from_id(memcg_id);
-	*lruvec = mem_cgroup_lruvec(memcg, pgdat);
-
-	min_seq = READ_ONCE((*lruvec)->lrugen.min_seq[file]);
-	return (*token >> LRU_REFS_WIDTH) == (min_seq & (EVICTION_MASK >> LRU_REFS_WIDTH));
+	min_seq = READ_ONCE(lruvec->lrugen.min_seq[file]);
+	return (token >> LRU_REFS_WIDTH) == (min_seq & (EVICTION_MASK >> LRU_REFS_WIDTH));
 }
 
 static void lru_gen_refault(struct folio *folio, void *shadow)
 {
+	int memcgid;
 	bool recent;
 	int hist, tier, refs;
 	bool workingset;
 	unsigned long token;
 	struct lruvec *lruvec;
+	struct pglist_data *pgdat;
 	struct lru_gen_folio *lrugen;
 	int type = folio_is_file_lru(folio);
 	int delta = folio_nr_pages(folio);
 
 	rcu_read_lock();
 
-	recent = lru_gen_test_recent(shadow, type, &lruvec, &token, &workingset);
+	unpack_shadow(shadow, &memcgid, &pgdat, &token, &workingset);
+	lruvec = mem_cgroup_lruvec(mem_cgroup_from_id(memcgid), pgdat);
 	if (lruvec != folio_lruvec(folio))
 		goto unlock;
 
 	mod_lruvec_state(lruvec, WORKINGSET_REFAULT_BASE + type, delta);
 
+	recent = lru_gen_test_recent(lruvec, type, token);
 	if (!recent)
 		goto unlock;
 
@@ -387,8 +383,8 @@ static void *lru_gen_eviction(struct folio *folio)
 	return NULL;
 }
 
-static bool lru_gen_test_recent(void *shadow, bool file, struct lruvec **lruvec,
-				unsigned long *token, bool *workingset)
+static bool lru_gen_test_recent(struct lruvec *lruvec, bool file,
+				unsigned long token)
 {
 	return false;
 }
@@ -454,15 +450,6 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset)
 	struct pglist_data *pgdat;
 	unsigned long eviction;
 
-	rcu_read_lock();
-
-	if (lru_gen_enabled()) {
-		bool recent = lru_gen_test_recent(shadow, file,
-				&eviction_lruvec, &eviction, workingset);
-		rcu_read_unlock();
-		return recent;
-	}
-
 	unpack_shadow(shadow, &memcgid, &pgdat, &eviction, workingset);
 
 	/*
@@ -481,13 +468,13 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset)
 	 * would be better if the root_mem_cgroup existed in all
 	 * configurations instead.
 	 */
+	rcu_read_lock();
 	eviction_memcg = mem_cgroup_from_id(memcgid);
 	if (!mem_cgroup_disabled() &&
 	    (!eviction_memcg || !mem_cgroup_tryget(eviction_memcg))) {
 		rcu_read_unlock();
 		return false;
 	}
-
 	rcu_read_unlock();
 
 	/*
@@ -498,6 +485,12 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset)
 	mem_cgroup_flush_stats_ratelimited(eviction_memcg);
 
 	eviction_lruvec = mem_cgroup_lruvec(eviction_memcg, pgdat);
+	if (lru_gen_enabled()) {
+		bool recent = lru_gen_test_recent(eviction_lruvec, file, eviction);
+		mem_cgroup_put(eviction_memcg);
+		return recent;
+	}
+
 	distance = lru_distance(eviction_memcg, eviction_lruvec, eviction,
 				file, EVICTION_BITS, bucket_order);
 
@@ -519,6 +512,7 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset)
 	} else {
 		inactive_anon = 0;
 	}
+
 	mem_cgroup_put(eviction_memcg);
 
 	/*
