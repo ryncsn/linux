@@ -460,7 +460,8 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
 		 * It's bold assumption here, so be cautions and always require
 		 * one more access to get force protected again.
 		 */
-		set_mask_bits(&folio->flags, 0, (LRU_REFS_MASK - BIT(LRU_REFS_PGOFF) | BIT(PG_workingset)));
+		if (recent || refault <= REFAULT_MID)
+			set_mask_bits(&folio->flags, 0, ((LRU_REFS_MASK - BIT(LRU_REFS_PGOFF)) | BIT(PG_workingset)));
 		mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
 	}
 
