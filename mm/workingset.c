@@ -478,12 +478,10 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
 		/*
 		 * For pages beyound PID protection range, promote them.
 		 */
-		if (refs >= BIT(LRU_REFS_WIDTH) - 1) {
+		folio_set_workingset(folio);
+		refault_tier = lru_tier_from_refs(refs + 1);
+		if (refault_tier == tier)
 			folio_set_active(folio);
-		} else {
-			folio_set_workingset(folio);
-			refault_tier = lru_tier_from_refs(refs + 1);
-		}
 		mod_lruvec_state(lruvec, WORKINGSET_ACTIVATE_BASE + type, delta);
 	}
 
