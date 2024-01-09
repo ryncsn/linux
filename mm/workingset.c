@@ -460,10 +460,7 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
 		 * It's bold assumption here, so be cautions and always require
 		 * one more access to get force protected again.
 		 */
-		if (refault <= REFAULT_MID)
-			set_mask_bits(&folio->flags, 0, LRU_REFS_MASK | BIT(PG_workingset));
-		else
-			set_mask_bits(&folio->flags, 0, (LRU_REFS_MASK - BIT(LRU_REFS_PGOFF)) | BIT(PG_workingset));
+		set_mask_bits(&folio->flags, 0, (LRU_REFS_MASK - BIT(LRU_REFS_PGOFF) | BIT(PG_workingset)));
 		mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
 	}
 
@@ -477,7 +474,7 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
 	 * for a long time (refault distance > LRU / MIN_NR_GENS), there is no help keeping
 	 * it in memory
 	 */
-	if (refault <= REFAULT_SHORT) {
+	if (!lru_gen_in_fault() && refault <= REFAULT_SHORT) {
 		/*
 		 * For pages beyound PID protection range, promote them.
 		 */
