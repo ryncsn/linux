@@ -346,6 +346,7 @@ static void *lru_gen_eviction(struct folio *folio)
 
 	lruvec = mem_cgroup_lruvec(memcg, pgdat);
 	lrugen = &lruvec->lrugen;
+	hist = lru_hist_of_min_seq(lruvec, type);
 
 	workingset = !!refs;
 	token = (refs - workingset) & (BIT(LRU_REFS_WIDTH) - 1);
@@ -353,7 +354,6 @@ static void *lru_gen_eviction(struct folio *folio)
 	token |= lru_eviction(lruvec, delta, type,
 			      LRU_GEN_EVICTION_BITS, lru_gen_bucket_order);
 
-	hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
 	atomic_long_add(delta, &lrugen->evicted[hist][type][tier]);
 
 	return pack_shadow(mem_cgroup_id(memcg), pgdat, token, workingset);
@@ -371,7 +371,7 @@ static bool inline lru_gen_test_recent(struct lruvec *lruvec, bool type,
 	struct lru_gen_folio *lrugen;
 
 	lrugen = &lruvec->lrugen;
-	hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
+	hist = lru_hist_of_min_seq(lruvec, type);
 
 	for (int tier = 0; tier < MAX_NR_TIERS; tier++)
 		evicted = evicted + atomic_long_read(&lrugen->evicted[hist][type][tier]);
@@ -460,12 +460,15 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
 		 * It's bold assumption here, so be cautions and always require
 		 * one more access to get force protected again.
 		 */
-		set_mask_bits(&folio->flags, 0, (LRU_REFS_MASK - BIT(LRU_REFS_PGOFF)) | BIT(PG_workingset));
+		if (refault <= REFAULT_MID)
+			set_mask_bits(&folio->flags, 0, LRU_REFS_MASK | BIT(PG_workingset));
+		else
+			set_mask_bits(&folio->flags, 0, (LRU_REFS_MASK - BIT(LRU_REFS_PGOFF)) | BIT(PG_workingset));
 		mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
 	}
 
 	lrugen = &lruvec->lrugen;
-	hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
+	hist = lru_hist_of_min_seq(lruvec, type);
 	tier = lru_tier_from_refs(refs);
 	refault_tier = tier;
 

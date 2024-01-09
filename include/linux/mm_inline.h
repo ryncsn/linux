@@ -133,6 +133,14 @@ static inline int lru_hist_from_seq(unsigned long seq)
 	return seq % NR_HIST_GENS;
 }
 
+static inline int lru_hist_of_min_seq(struct lruvec *lruvec, bool type)
+{
+	if (IS_ENABLED(CONFIG_LRU_GEN_STATS))
+		return lru_gen_from_seq(READ_ONCE(lruvec->lrugen.min_seq[type]));
+	else
+		return 0;
+}
+
 static inline int lru_tier_from_refs(int refs)
 {
 	VM_WARN_ON_ONCE(refs > BIT(LRU_REFS_WIDTH));
