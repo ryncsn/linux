@@ -133,18 +133,17 @@ static inline int lru_hist_from_seq(unsigned long seq)
 	return seq % NR_HIST_GENS;
 }
 
-static inline int lru_tier_from_refs(int refs)
+static inline int lru_tier_from_refs(int refs, bool workingset)
 {
-	VM_WARN_ON_ONCE(refs > BIT(LRU_REFS_WIDTH));
+	VM_WARN_ON_ONCE(refs >= BIT(LRU_REFS_WIDTH));
 
 	/* see the comment in folio_lru_refs() */
-	return order_base_2(refs + 1);
+	return workingset ? MAX_NR_TIERS - 1 : order_base_2(refs + 1);
 }
 
 static inline int folio_lru_refs(struct folio *folio)
 {
 	unsigned long flags = READ_ONCE(folio->flags);
-	bool workingset = flags & BIT(PG_workingset);
 
 	/*
 	 * Return the number of accesses beyond PG_referenced, i.e., N-1 if the
@@ -152,7 +151,18 @@ static inline int folio_lru_refs(struct folio *folio)
 	 * tier. lru_tier_from_refs() will account for this off-by-one. Also see
 	 * the comment on MAX_NR_TIERS.
 	 */
-	return ((flags & LRU_REFS_MASK) >> LRU_REFS_PGOFF) + workingset;
+	return flags & BIT(PG_referenced) ? (flags & LRU_REFS_MASK) >> LRU_REFS_PGOFF : 0;
+}
+
+static inline bool lru_gen_activate(struct folio *folio)
+{
+	if (!folio_test_referenced(folio) && !folio_test_workingset(folio)) {
+		folio_set_referenced(folio);
+		return false;
+	}
+
+	set_mask_bits(&folio->flags, LRU_REFS_FLAGS, BIT(PG_workingset));
+	return true;
 }
 
 static inline int folio_lru_gen(struct folio *folio)
@@ -244,15 +254,15 @@ static inline bool lru_gen_add_folio(struct lruvec *lruvec, struct folio *folio,
 	 *    oldest generation otherwise. See lru_gen_is_active().
 	 */
 	if (folio_test_active(folio))
-		seq = lrugen->max_seq;
+		seq = lrugen->max_seq - !folio_test_workingset(folio);
 	else if ((type == LRU_GEN_ANON && !folio_test_swapcache(folio)) ||
 		 (folio_test_reclaim(folio) &&
 		  (folio_test_dirty(folio) || folio_test_writeback(folio))))
 		seq = lrugen->max_seq - 1;
-	else if (reclaiming || lrugen->min_seq[type] + MIN_NR_GENS >= lrugen->max_seq)
+	else if (reclaiming)
 		seq = lrugen->min_seq[type];
 	else
-		seq = lrugen->min_seq[type] + 1;
+		seq = lrugen->min_seq[type] + folio_test_workingset(folio);
 
 	gen = lru_gen_from_seq(seq);
 	flags = (gen + 1UL) << LRU_GEN_PGOFF;
@@ -299,6 +309,11 @@ static inline bool lru_gen_enabled(void)
 }
 
 static inline bool lru_gen_in_fault(void)
+{
+	return false;
+}
+
+static inline bool lru_gen_activate(struct folio *folio)
 {
 	return false;
 }

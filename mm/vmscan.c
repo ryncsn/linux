@@ -828,7 +828,6 @@ static enum folio_references folio_check_references(struct folio *folio,
 
 	referenced_ptes = folio_referenced(folio, 1, sc->target_mem_cgroup,
 					   &vm_flags);
-	referenced_folio = folio_test_clear_referenced(folio);
 
 	/*
 	 * The supposedly reclaimable folio was found to be in a VM_LOCKED vma.
@@ -840,6 +839,16 @@ static enum folio_references folio_check_references(struct folio *folio,
 	/* rmap lock contention: rotate */
 	if (referenced_ptes == -1)
 		return FOLIOREF_KEEP;
+
+	if (lru_gen_enabled()) {
+		if (!referenced_ptes)
+			return FOLIOREF_RECLAIM;
+
+		lru_gen_activate(folio);
+		return FOLIOREF_ACTIVATE;
+	}
+
+	referenced_folio = folio_test_clear_referenced(folio);
 
 	if (referenced_ptes) {
 		/*
@@ -1045,11 +1054,6 @@ retry:
 			goto activate_locked;
 
 		if (!sc->may_unmap && folio_mapped(folio))
-			goto keep_locked;
-
-		/* folio_update_gen() tried to promote this page? */
-		if (lru_gen_enabled() && !ignore_references &&
-		    folio_mapped(folio) && folio_test_referenced(folio))
 			goto keep_locked;
 
 		/*
@@ -2558,8 +2562,6 @@ static bool should_clear_pmd_young(void)
  *                          shorthand helpers
  ******************************************************************************/
 
-#define LRU_REFS_FLAGS	(BIT(PG_referenced) | BIT(PG_workingset))
-
 #define DEFINE_MAX_SEQ(lruvec)						\
 	unsigned long max_seq = READ_ONCE((lruvec)->lrugen.max_seq)
 
@@ -3098,16 +3100,18 @@ static int folio_update_gen(struct folio *folio, int gen)
 	VM_WARN_ON_ONCE(gen >= MAX_NR_GENS);
 	VM_WARN_ON_ONCE(!rcu_read_lock_held());
 
+	if (!folio_test_referenced(folio) && !folio_test_workingset(folio)) {
+		folio_set_referenced(folio);
+		return -1;
+	}
+
 	do {
 		/* lru_gen_del_folio() has isolated this page? */
-		if (!(old_flags & LRU_GEN_MASK)) {
-			/* for shrink_folio_list() */
-			new_flags = old_flags | BIT(PG_referenced);
-			continue;
-		}
+		if (!(old_flags & LRU_GEN_MASK))
+			return -1;
 
-		new_flags = old_flags & ~(LRU_GEN_MASK | LRU_REFS_MASK | LRU_REFS_FLAGS);
-		new_flags |= (gen + 1UL) << LRU_GEN_PGOFF;
+		new_flags = old_flags & ~(LRU_GEN_MASK | LRU_REFS_FLAGS);
+		new_flags |= ((gen + 1UL) << LRU_GEN_PGOFF) | BIT(PG_workingset);
 	} while (!try_cmpxchg(&folio->flags, &old_flags, new_flags));
 
 	return ((old_flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
@@ -3131,7 +3135,7 @@ static int folio_inc_gen(struct lruvec *lruvec, struct folio *folio, bool reclai
 
 		new_gen = (old_gen + 1) % MAX_NR_GENS;
 
-		new_flags = old_flags & ~(LRU_GEN_MASK | LRU_REFS_MASK | LRU_REFS_FLAGS);
+		new_flags = old_flags & ~(LRU_GEN_MASK | LRU_REFS_FLAGS);
 		new_flags |= (new_gen + 1UL) << LRU_GEN_PGOFF;
 		/* for folio_end_writeback() */
 		if (reclaiming)
@@ -3302,6 +3306,9 @@ static struct folio *get_pfn_folio(unsigned long pfn, struct mem_cgroup *memcg,
 		return NULL;
 
 	if (folio_memcg_rcu(folio) != memcg)
+		return NULL;
+
+	if (!folio_test_lru(folio))
 		return NULL;
 
 	/* file VMAs can contain anon pages from COW */
@@ -4061,11 +4068,11 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 			continue;
 		}
 
-		old_gen = folio_lru_gen(folio);
-		if (old_gen < 0)
-			folio_set_referenced(folio);
-		else if (old_gen != new_gen)
-			folio_activate(folio);
+		if (lru_gen_activate(folio)) {
+			old_gen = folio_lru_gen(folio);
+			if (old_gen >= 0 && old_gen != new_gen)
+				folio_activate(folio);
+		}
 	}
 
 	arch_leave_lazy_mmu_mode();
@@ -4223,7 +4230,8 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
 	int zone = folio_zonenum(folio);
 	int delta = folio_nr_pages(folio);
 	int refs = folio_lru_refs(folio);
-	int tier = lru_tier_from_refs(refs);
+	bool workingset = folio_test_workingset(folio);
+	int tier = lru_tier_from_refs(refs, workingset);
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 
 	VM_WARN_ON_ONCE_FOLIO(gen >= MAX_NR_GENS, folio);
@@ -4254,7 +4262,7 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
 	}
 
 	/* protected */
-	if (tier > tier_idx || refs == BIT(LRU_REFS_WIDTH)) {
+	if (tier > tier_idx || refs + workingset == BIT(LRU_REFS_WIDTH)) {
 		int hist = lru_hist_from_seq(lrugen->min_seq[type]);
 
 		gen = folio_inc_gen(lruvec, folio, false);
@@ -4305,11 +4313,10 @@ static bool isolate_folio(struct lruvec *lruvec, struct folio *folio, struct sca
 
 	/* see the comment on MAX_NR_TIERS */
 	if (!folio_test_referenced(folio))
-		set_mask_bits(&folio->flags, LRU_REFS_MASK | LRU_REFS_FLAGS, 0);
+		set_mask_bits(&folio->flags, LRU_REFS_MASK, 0);
 
 	/* for shrink_folio_list() */
 	folio_clear_reclaim(folio);
-	folio_clear_referenced(folio);
 
 	success = lru_gen_del_folio(lruvec, folio, true);
 	VM_WARN_ON_ONCE_FOLIO(!success, folio);
@@ -4531,20 +4538,15 @@ retry:
 			continue;
 		}
 
-		if (folio_test_reclaim(folio) &&
-		    (folio_test_dirty(folio) || folio_test_writeback(folio))) {
-			/* restore LRU_REFS_FLAGS cleared by isolate_folio() */
-			if (folio_test_workingset(folio))
-				folio_set_referenced(folio);
+		if (folio_test_active(folio) ||
+		    (type == LRU_GEN_ANON && !folio_test_swapcache(folio)) ||
+		    (folio_test_reclaim(folio) &&
+		     (folio_test_dirty(folio) || folio_test_writeback(folio))))
 			continue;
-		}
 
-		if (skip_retry || folio_test_active(folio) || folio_test_referenced(folio) ||
-		    folio_mapped(folio) || folio_test_locked(folio) ||
-		    folio_test_dirty(folio) || folio_test_writeback(folio)) {
+		if (skip_retry) {
 			/* don't add rejected folios to the oldest generation */
-			set_mask_bits(&folio->flags, LRU_REFS_MASK | LRU_REFS_FLAGS,
-				      BIT(PG_active));
+			folio_set_active(folio);
 			continue;
 		}
 
@@ -4587,9 +4589,7 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 			     struct scan_control *sc, bool can_swap, unsigned long *nr_to_scan)
 {
 	int gen, type, zone;
-	unsigned long old = 0;
-	unsigned long young = 0;
-	unsigned long total = 0;
+	unsigned long size = 0;
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 	DEFINE_MIN_SEQ(lruvec);
@@ -4604,50 +4604,21 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 		unsigned long seq;
 
 		for (seq = min_seq[type]; seq <= max_seq; seq++) {
-			unsigned long size = 0;
-
 			gen = lru_gen_from_seq(seq);
 
 			for (zone = 0; zone < MAX_NR_ZONES; zone++)
 				size += max(READ_ONCE(lrugen->nr_pages[gen][type][zone]), 0L);
-
-			total += size;
-			if (seq == max_seq)
-				young += size;
-			else if (seq + MIN_NR_GENS == max_seq)
-				old += size;
 		}
 	}
 
 	/* try to scrape all its memory if this memcg was deleted */
 	if (!mem_cgroup_online(memcg)) {
-		*nr_to_scan = total;
+		*nr_to_scan = size;
 		return false;
 	}
 
-	*nr_to_scan = total >> sc->priority;
-
-	/*
-	 * The aging tries to be lazy to reduce the overhead, while the eviction
-	 * stalls when the number of generations reaches MIN_NR_GENS. Hence, the
-	 * ideal number of generations is MIN_NR_GENS+1.
-	 */
-	if (min_seq[!can_swap] + MIN_NR_GENS < max_seq)
-		return false;
-
-	/*
-	 * It's also ideal to spread pages out evenly, i.e., 1/(MIN_NR_GENS+1)
-	 * of the total number of pages for each generation. A reasonable range
-	 * for this average portion is [1/MIN_NR_GENS, 1/(MIN_NR_GENS+2)]. The
-	 * aging cares about the upper bound of hot pages, while the eviction
-	 * cares about the lower bound of cold pages.
-	 */
-	if (young * MIN_NR_GENS > total)
-		return true;
-	if (old * (MIN_NR_GENS + 2) < total)
-		return true;
-
-	return false;
+	*nr_to_scan = size >> sc->priority;
+	return min_seq[!can_swap] + MIN_NR_GENS == max_seq;
 }
 
 /*

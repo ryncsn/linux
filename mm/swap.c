@@ -424,19 +424,14 @@ static void folio_inc_refs(struct folio *folio)
 		return;
 	}
 
-	if (!folio_test_workingset(folio)) {
-		folio_set_workingset(folio);
-		return;
-	}
-
 	/* see the comment on MAX_NR_TIERS */
 	do {
-		new_flags = old_flags & LRU_REFS_MASK;
-		if (new_flags == LRU_REFS_MASK)
-			break;
+		if ((old_flags & LRU_REFS_MASK) == LRU_REFS_MASK) {
+			folio_set_workingset(folio);
+			return;
+		}
 
-		new_flags += BIT(LRU_REFS_PGOFF);
-		new_flags |= old_flags & ~LRU_REFS_MASK;
+		new_flags = old_flags + BIT(LRU_REFS_PGOFF);
 	} while (!try_cmpxchg(&folio->flags, &old_flags, new_flags));
 }
 #else
