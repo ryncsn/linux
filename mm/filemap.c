@@ -913,6 +913,9 @@ noinline int __add_to_page_cache_locked(struct page *page,
 		if (order > thp_order(page))
 			xas_split_alloc(&xas, xa_load(xas.xa, xas.xa_index),
 					order, gfp);
+			if (xas_error(&xas))
+				goto error;
+		}
 		xas_lock_irq(&xas);
 		xas_for_each_conflict(&xas, entry) {
 			old = entry;
