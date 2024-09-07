@@ -64,9 +64,7 @@ static inline void __list_add(struct list_head *new,
 			      struct list_head *prev,
 			      struct list_head *next)
 {
-	if (!__list_add_valid(new, prev, next))
-		return;
-
+	__list_add_valid(new, prev, next);
 	next->prev = new;
 	new->next = next;
 	new->prev = prev;
@@ -129,9 +127,7 @@ static inline void __list_del_clearprev(struct list_head *entry)
 
 static inline void __list_del_entry(struct list_head *entry)
 {
-	if (!__list_del_entry_valid(entry))
-		return;
-
+	__list_del_entry_valid(entry);
 	__list_del(entry->prev, entry->next);
 }
 

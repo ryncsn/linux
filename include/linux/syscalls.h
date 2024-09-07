@@ -290,9 +290,7 @@ static inline void addr_limit_user_check(void)
 		return;
 #endif
 
-	if (CHECK_DATA_CORRUPTION(uaccess_kernel(),
-				  "Invalid address limit on user-mode return"))
-		force_sig(SIGKILL);
+	CHECK_DATA_CORRUPTION(uaccess_kernel(), "Invalid address limit on user-mode return");
 
 #ifdef TIF_FSCHECK
 	clear_thread_flag(TIF_FSCHECK);
