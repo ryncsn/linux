@@ -81,11 +81,7 @@
 
 #include <trace/events/sched.h>
 
-#ifdef CONFIG_SCHED_DEBUG
-# define SCHED_WARN_ON(x)	WARN_ONCE(x, #x)
-#else
-# define SCHED_WARN_ON(x)	({ (void)(x), 0; })
-#endif
+#define SCHED_WARN_ON(x)	({ (void)(x), 0; })
 
 struct rq;
 struct cpuidle_state;
