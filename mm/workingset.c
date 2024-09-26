@@ -74,16 +74,16 @@
  * under pressure.
  *
  * For an approximation of the sliding distance of a page before it
- * is re-accessed, we introduce a counter `nonresistence_age` (NA)
+ * is re-accessed, we introduce a counter `eviction` (E)
  * here. This counter increases on each eviction, evicted page will
- * have a shadow that stores the NA reading at the eviction time
+ * have a shadow that stores the E reading at the eviction time
  * as a timestamp.
  *
- * If we consider shadows are logically ordered by the their NA values,
+ * If we consider shadows are logically ordered by the their E values,
  * they will form an read-only imaginary "shadow LRU". When an evicted
  * page was faulted again, we have:
  *
- *   Let SP = ((NA's reading @ current) - (NA's reading @ eviction))
+ *   Let SP = ((E's reading @ current) - (E's reading @ eviction))
  *
  *                            +---- available memory -----+
  *                            |                           |
@@ -115,9 +115,17 @@
  *
  * And because there are two types of pages, we want to sacrifice the
  * inactive part of opposite type so cold pages are reclaimed more
- * proactively, so it will be:
+ * proactively:
  *
  * SP(anon / file) < NR_ACTIVE(anon + file) + NR_INACTIVE(file / anon)
+ *
+ * And when counting the `eviction` counter of two types of pages
+ * seperately, it can provide better accuracy and making considering
+ * swappiness as a factor for balance possible, the formula will be:
+ *
+ *  SP(anon / file) < NR_INACTIVE(file / anon) +
+ *                    NR_ACTIVE(file) * (1 - (swappiness / MAX_SWAPPINESS)) +
+ *                    NR_ACTIVE(anon) * (swappiness / MAX_SWAPPINESS)
  *
  * If this evaluates to true, then the page is worth getting reactivated.
  *
@@ -167,7 +175,7 @@
  *		Implementation
  *
  * For each node's LRU lists, a counter for inactive evictions and
- * activations is maintained (node->nonresident_age).
+ * activations is maintained (node->evictions).
  *
  * On eviction, a snapshot of this counter (along with some bits to
  * identify the node) is stored in the now empty page cache
@@ -350,7 +358,7 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
  * to the in-memory dimensions. This function allows reclaim and LRU
  * operations to drive the non-resident aging along in parallel.
  */
-static void workingset_age_nonresident(struct lruvec *lruvec, unsigned long nr_pages)
+static void workingset_age_nonresident(struct lruvec *lruvec, unsigned long nr_pages, int type)
 {
 	/*
 	 * Reclaiming a cgroup means reclaiming all its children in a
@@ -364,7 +372,7 @@ static void workingset_age_nonresident(struct lruvec *lruvec, unsigned long nr_p
 	 * the root cgroup's, age as well.
 	 */
 	do {
-		atomic_long_add(nr_pages, &lruvec->nonresident_age);
+		atomic_long_add(nr_pages, &lruvec->evictions[type]);
 	} while ((lruvec = parent_lruvec(lruvec)));
 }
 
@@ -382,6 +390,7 @@ void *workingset_eviction(struct folio *folio, struct mem_cgroup *target_memcg)
 	unsigned long eviction;
 	struct lruvec *lruvec;
 	int memcgid;
+	int type;
 
 	/* Folio is fully exclusive and pins folio's memory cgroup pointer */
 	VM_BUG_ON_FOLIO(folio_test_lru(folio), folio);
@@ -391,12 +400,13 @@ void *workingset_eviction(struct folio *folio, struct mem_cgroup *target_memcg)
 	if (lru_gen_enabled())
 		return lru_gen_eviction(folio);
 
+	type = folio_is_file_lru(folio);
 	lruvec = mem_cgroup_lruvec(target_memcg, pgdat);
 	/* XXX: target_memcg can be NULL, go through lruvec */
 	memcgid = mem_cgroup_id(lruvec_memcg(lruvec));
-	eviction = atomic_long_read(&lruvec->nonresident_age);
+	eviction = atomic_long_read(&lruvec->evictions[type]);
 	eviction >>= bucket_order;
-	workingset_age_nonresident(lruvec, folio_nr_pages(folio));
+	workingset_age_nonresident(lruvec, folio_nr_pages(folio), type);
 	return pack_shadow(memcgid, pgdat, eviction,
 				folio_test_workingset(folio));
 }
@@ -426,6 +436,7 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset,
 	int memcgid;
 	struct pglist_data *pgdat;
 	unsigned long eviction;
+	int swappiness = 0;
 
 	rcu_read_lock();
 
@@ -479,17 +490,17 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset,
 		mem_cgroup_flush_stats_ratelimited(eviction_memcg);
 
 	eviction_lruvec = mem_cgroup_lruvec(eviction_memcg, pgdat);
-	refault = atomic_long_read(&eviction_lruvec->nonresident_age);
+	refault = atomic_long_read(&eviction_lruvec->evictions[file]);
 
 	/*
 	 * Calculate the refault distance
 	 *
 	 * The unsigned subtraction here gives an accurate distance
-	 * across nonresident_age overflows in most cases. There is a
+	 * across overflows in most cases. There is a
 	 * special case: usually, shadow entries have a short lifetime
 	 * and are either refaulted or reclaimed along with the inode
 	 * before they get too old.  But it is not impossible for the
-	 * nonresident_age to lap a shadow entry in the field, which
+	 * eviction counter to lap a shadow entry in the field, which
 	 * can then result in a false small refault distance, leading
 	 * to a false activation should this old entry actually
 	 * refault again.  However, earlier kernels used to deactivate
@@ -510,6 +521,7 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset,
 	inactive_file = lruvec_page_state(eviction_lruvec, NR_INACTIVE_FILE);
 
 	if (mem_cgroup_get_nr_swap_pages(eviction_memcg)) {
+		swappiness = mem_cgroup_swappiness(eviction_memcg);
 		active_anon = lruvec_page_state(eviction_lruvec,
 						     NR_ACTIVE_ANON);
 		inactive_anon = lruvec_page_state(eviction_lruvec,
@@ -517,8 +529,12 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset,
 	}
 	mem_cgroup_put(eviction_memcg);
 
-	return refault_distance < (active_file + active_anon) + \
-				  (file ? inactive_anon : inactive_file);
+	refault_distance -= (file ? inactive_anon : inactive_file);
+	refault_distance *= MAX_SWAPPINESS;
+	active_file *= (MAX_SWAPPINESS - swappiness);
+	active_anon *= swappiness;
+
+	return refault_distance < active_file + active_anon;
 }
 
 /**
