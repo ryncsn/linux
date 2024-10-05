@@ -1046,9 +1046,6 @@ int get_swap_pages(int n_goal, swp_entry_t swp_entries[], int entry_size)
 	int n_ret = 0;
 	int node;
 
-	/* Only single cluster request supported */
-	WARN_ON_ONCE(n_goal > 1 && size == SWAPFILE_CLUSTER);
-
 	spin_lock(&swap_avail_lock);
 
 	avail_pgs = atomic_long_read(&nr_swap_pages) / size;
@@ -1064,8 +1061,6 @@ int get_swap_pages(int n_goal, swp_entry_t swp_entries[], int entry_size)
 start_over:
 	node = numa_node_id();
 	plist_for_each_entry_safe(si, next, &swap_avail_heads[node], avail_lists[node]) {
-		/* requeue si to after same-priority siblings */
-		plist_requeue(&si->avail_lists[node], &swap_avail_heads[node]);
 		spin_unlock(&swap_avail_lock);
 		spin_lock(&si->lock);
 		if (!si->highest_bit || !(si->flags & SWP_WRITEOK)) {
@@ -1074,12 +1069,6 @@ start_over:
 				spin_unlock(&si->lock);
 				goto nextsi;
 			}
-			WARN(!si->highest_bit,
-			     "swap_info %d in list but !highest_bit\n",
-			     si->type);
-			WARN(!(si->flags & SWP_WRITEOK),
-			     "swap_info %d in list but !SWP_WRITEOK\n",
-			     si->type);
 			__del_from_avail_list(si);
 			spin_unlock(&si->lock);
 			goto nextsi;
@@ -1423,13 +1412,6 @@ int split_swap_cluster(swp_entry_t entry)
 }
 #endif
 
-static int swp_entry_cmp(const void *ent1, const void *ent2)
-{
-	const swp_entry_t *e1 = ent1, *e2 = ent2;
-
-	return (int)swp_type(*e1) - (int)swp_type(*e2);
-}
-
 void swapcache_free_entries(swp_entry_t *entries, int n)
 {
 	struct swap_info_struct *p, *prev;
@@ -1441,13 +1423,6 @@ void swapcache_free_entries(swp_entry_t *entries, int n)
 	prev = NULL;
 	p = NULL;
 
-	/*
-	 * Sort swap entries by swap device, so each lock is only taken once.
-	 * nr_swapfiles isn't absolutely correct, but the overhead of sort() is
-	 * so low that it isn't necessary to optimize further.
-	 */
-	if (nr_swapfiles > 1)
-		sort(entries, n, sizeof(entries[0]), swp_entry_cmp, NULL);
 	for (i = 0; i < n; ++i) {
 		p = swap_info_get_cont(entries[i], prev);
 		if (p)
