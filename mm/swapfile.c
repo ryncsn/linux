@@ -423,6 +423,12 @@ static inline unsigned int cluster_index(struct swap_info_struct *si,
 	return ci - si->cluster_info;
 }
 
+static inline struct swap_cluster_info *offset_to_cluster(struct swap_info_struct *si,
+							  unsigned long offset)
+{
+	return &si->cluster_info[offset / SWAPFILE_CLUSTER];
+}
+
 static inline unsigned int cluster_offset(struct swap_info_struct *si,
 					  struct swap_cluster_info *ci)
 {
@@ -434,7 +440,7 @@ static inline struct swap_cluster_info *lock_cluster(struct swap_info_struct *si
 {
 	struct swap_cluster_info *ci;
 
-	ci = &si->cluster_info[offset / SWAPFILE_CLUSTER];
+	ci = offset_to_cluster(si, offset);
 	spin_lock(&ci->lock);
 
 	return ci;
@@ -756,7 +762,7 @@ static unsigned int alloc_swap_scan_cluster(struct swap_info_struct *si,
 	bool need_reclaim, ret;
 	struct swap_cluster_info *ci;
 
-	ci = &si->cluster_info[offset / SWAPFILE_CLUSTER];
+	ci = offset_to_cluster(si, offset);
 	lockdep_assert_held(&ci->lock);
 
 	if (end < nr_pages || ci->count + nr_pages > SWAPFILE_CLUSTER)
@@ -1457,10 +1463,10 @@ static void swap_entry_range_free(struct swap_info_struct *si, swp_entry_t entry
 	unsigned char *map_end = map + nr_pages;
 	struct swap_cluster_info *ci;
 
-	/* It should never free entries across different clusters */
-	VM_BUG_ON((offset / SWAPFILE_CLUSTER) != ((offset + nr_pages - 1) / SWAPFILE_CLUSTER));
-
 	ci = lock_cluster(si, offset);
+
+	/* It should never free entries across different clusters */
+	VM_BUG_ON(ci != offset_to_cluster(si, offset + nr_pages - 1));
 	VM_BUG_ON(cluster_is_free(ci));
 	VM_BUG_ON(ci->count < nr_pages);
 
