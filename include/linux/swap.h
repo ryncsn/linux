@@ -265,6 +265,8 @@ enum swap_cluster_flags {
 	CLUSTER_FLAG_FREE,
 	CLUSTER_FLAG_NONFULL,
 	CLUSTER_FLAG_FRAG,
+	/* Clusters with flags above are allocatable */
+	CLUSTER_FLAG_USABLE = CLUSTER_FLAG_FRAG,
 	CLUSTER_FLAG_FULL,
 	CLUSTER_FLAG_DISCARD,
 	CLUSTER_FLAG_MAX,
@@ -290,6 +292,7 @@ enum swap_cluster_flags {
  * throughput.
  */
 struct percpu_cluster {
+	local_lock_t lock; /* Protect the percpu_cluster above */
 	unsigned int next[SWAP_NR_ORDERS]; /* Likely next allocation offset */
 };
 
@@ -312,7 +315,7 @@ struct swap_info_struct {
 					/* list of cluster that contains at least one free slot */
 	struct list_head frag_clusters[SWAP_NR_ORDERS];
 					/* list of cluster that are fragmented or contented */
-	unsigned int frag_cluster_nr[SWAP_NR_ORDERS];
+	atomic_long_t frag_cluster_nr[SWAP_NR_ORDERS];
 	unsigned int pages;		/* total of usable pages of swap */
 	atomic_long_t inuse_pages;	/* number of those currently in use */
 	struct percpu_cluster __percpu *percpu_cluster; /* per cpu's swap location */
