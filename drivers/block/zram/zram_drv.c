@@ -2555,8 +2555,7 @@ static int zram_add(void)
 #if ZRAM_LOGICAL_BLOCK_SIZE == PAGE_SIZE
 		.max_write_zeroes_sectors	= UINT_MAX,
 #endif
-		.features			= BLK_FEAT_STABLE_WRITES |
-						  BLK_FEAT_SYNCHRONOUS,
+		.features			= BLK_FEAT_STABLE_WRITES,
 	};
 	struct zram *zram;
 	int ret, device_id;
