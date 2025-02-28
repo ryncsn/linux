@@ -3707,7 +3707,7 @@ long memfd_pin_folios(struct file *memfd, loff_t start, loff_t end,
 				 * unique set of folios between start and end.
 				 */
 				if (next_idx &&
-				    next_idx != folio_index(fbatch.folios[i]))
+				    next_idx != fbatch.folios[i]->index)
 					continue;
 
 				folio = page_folio(&fbatch.folios[i]->page);
