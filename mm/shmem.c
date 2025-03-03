@@ -509,11 +509,29 @@ static int shmem_replace_entry(struct address_space *mapping,
  *
  * Checking folio is not enough: by the time a swapcache folio is locked, it
  * might be reused, and again be swapcache, using the same swap as before.
+ *
+ * Check both swap entry value and order are match for a folio to be swapped in.
  */
 static bool shmem_confirm_swap(struct address_space *mapping,
-			       pgoff_t index, swp_entry_t swap)
+			       pgoff_t index, swp_entry_t swap, int nr_ent)
 {
-	return xa_load(&mapping->i_pages, index) == swp_to_radix_entry(swap);
+	XA_STATE(xas, &mapping->i_pages, index);
+	unsigned int type = swp_type(swap);
+	pgoff_t offset = swp_offset(swap);
+	void *entry;
+
+	rcu_read_lock();
+	xas_for_each(&xas, entry, index + nr_ent - 1) {
+		if (entry != swp_to_radix_entry(swp_entry(type, offset)))
+			break;
+		offset += 1 << xas_get_order(&xas);
+	}
+	rcu_read_unlock();
+
+	if (offset == swp_offset(swap) + nr_ent)
+		return true;
+
+	return false;
 }
 
 /*
@@ -2239,7 +2257,7 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 
 	si = get_swap_device(swap);
 	if (!si) {
-		if (!shmem_confirm_swap(mapping, index, swap))
+		if (!shmem_confirm_swap(mapping, index, swap, 1))
 			return -EEXIST;
 		else
 			return -EINVAL;
@@ -2305,7 +2323,6 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 		 */
 		if (split_order > 0) {
 			pgoff_t offset = index - round_down(index, 1 << split_order);
-
 			swap = swp_entry(swp_type(swap), swp_offset(swap) + offset);
 		}
 
@@ -2315,7 +2332,7 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 			error = -ENOMEM;
 			goto failed;
 		}
-	} else if (order != folio_order(folio)) {
+	} else if (order > folio_order(folio)) {
 		/*
 		 * Swap readahead may swap in order 0 folios into swapcache
 		 * asynchronously, while the shmem mapping can still stores
@@ -2327,25 +2344,20 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 			error = split_order;
 			goto failed;
 		}
-
-		/*
-		 * If the large swap entry has already been split, it is
-		 * necessary to recalculate the new swap entry based on
-		 * the old order alignment.
-		 */
-		if (split_order > 0) {
-			pgoff_t offset = index - round_down(index, 1 << split_order);
-
-			swap = swp_entry(swp_type(swap), swp_offset(swap) + offset);
-		}
 	}
 alloced:
 	/* We have to do this with folio locked to prevent races */
 	folio_lock(folio);
-	if ((!skip_swapcache && !folio_test_swapcache(folio)) ||
-	    folio->swap.val != swap.val ||
-	    !shmem_confirm_swap(mapping, index, swap) ||
-	    xa_get_order(&mapping->i_pages, index) != folio_order(folio)) {
+	if (!folio_swap_contains(folio, swap, skip_swapcache)) {
+		error = -EEXIST;
+		goto unlock;
+	}
+
+	nr_pages = folio_nr_pages(folio);
+	index = round_down(index, nr_pages);
+	swap = swp_entry(swp_type(swap), round_down(swp_offset(swap), nr_pages));
+
+	if (!shmem_confirm_swap(mapping, index, swap, nr_pages)) {
 		error = -EEXIST;
 		goto unlock;
 	}
@@ -2354,7 +2366,6 @@ alloced:
 		goto failed;
 	}
 	folio_wait_writeback(folio);
-	nr_pages = folio_nr_pages(folio);
 
 	/*
 	 * Some architectures may have to restore extra metadata to the
@@ -2368,8 +2379,7 @@ alloced:
 			goto failed;
 	}
 
-	error = shmem_add_to_page_cache(folio, mapping,
-					round_down(index, nr_pages),
+	error = shmem_add_to_page_cache(folio, mapping, index,
 					swp_to_radix_entry(swap), gfp);
 	if (error)
 		goto failed;
@@ -2392,7 +2402,7 @@ alloced:
 	*foliop = folio;
 	return 0;
 failed:
-	if (!shmem_confirm_swap(mapping, index, swap))
+	if (!shmem_confirm_swap(mapping, index, swap, 1))
 		error = -EEXIST;
 	if (error == -EIO)
 		shmem_set_folio_swapin_error(inode, index, folio, swap,
