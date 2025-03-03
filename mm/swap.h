@@ -191,6 +191,17 @@ static inline pgoff_t folio_index(struct folio *folio)
 	return folio->index;
 }
 
+/* Check if a swap entry is contained by a folio. */
+static inline bool folio_swap_contains(struct folio *folio, swp_entry_t swp,
+				       bool direct)
+{
+	if (unlikely(!direct && !folio_test_swapcache(folio)))
+		return false;
+	if (swp_type(swp) != swp_type(folio->swap))
+		return false;
+	return (swp_offset(swp) - swp_offset(folio->swap)) < folio_nr_pages(folio);
+}
+
 void show_swap_cache_info(void);
 void delete_from_swap_cache(struct folio *folio);
 struct folio *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
