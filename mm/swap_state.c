@@ -531,6 +531,32 @@ out:
 	return swapcache;
 }
 
+/**
+ * swapin_direct - swap-in one or multiple entries skipping readahead
+ *
+ * @entry: swap entry to swap-in
+ * @folio: pre allocated memory
+ *
+ * Reads @entry into @folio. @folio will be added to swap cache first, if
+ * this raced with another reader, only one will be added into swap cache
+ * successfully, and it will be returned for all readers. If returned folio
+ * is a large folio, continues entries will be read.
+ */
+struct folio *swapin_entry(swp_entry_t entry, struct folio *folio)
+{
+	int nr_pages = folio_nr_pages(folio);;
+	struct folio *swapcache = NULL;
+
+	if (nr_pages > 1)
+		entry.val = ALIGN_DOWN(entry.val, nr_pages);
+
+	swapcache = __swapin_cache_add_prepare(entry, folio, false);
+	if (swapcache == folio)
+		swap_read_folio(folio, NULL);
+
+	return swapcache;
+}
+
 /*
  * Locate a page of swap in physical memory, reserving swap cache space
  * and reading the disk if it is not already cached.
