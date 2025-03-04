@@ -26,8 +26,8 @@
 #include "swap.h"
 
 /*
- * swapper_space is a fiction, retained to simplify the path through
- * vmscan's shrink_folio_list.
+ * swap_space is a fiction, retained to simplify the path through
+ * vmscan's shrink_folio_list, should be read only.
  */
 static const struct address_space_operations swap_aops = {
 	.writepage	= swap_writepage,
@@ -37,8 +37,10 @@ static const struct address_space_operations swap_aops = {
 #endif
 };
 
-struct address_space *swapper_spaces[MAX_SWAPFILES] __read_mostly;
-static unsigned int nr_swapper_spaces[MAX_SWAPFILES] __read_mostly;
+struct address_space swap_space __ro_after_init = {
+	.a_ops = &swap_aops,
+};
+
 static bool enable_vma_readahead __read_mostly = true;
 
 #define SWAP_RA_ORDER_CEILING	5
@@ -70,157 +72,246 @@ void show_swap_cache_info(void)
 	printk("Total swap = %lukB\n", K(total_swap_pages));
 }
 
-void *get_shadow_from_swap_cache(swp_entry_t entry)
+int swap_table_alloc(struct swap_cluster_info *ci)
 {
-	struct address_space *address_space = swap_address_space(entry);
-	pgoff_t idx = swap_cache_index(entry);
-	void *shadow;
+	WARN_ON(ci->table);
+	ci->table = kzalloc(sizeof(swap_table_entry) * SWAPFILE_CLUSTER,
+			    GFP_KERNEL);
+	if (!ci->table)
+		return -ENOMEM;
+	return 0;
+}
 
-	shadow = xa_load(&address_space->i_pages, idx);
-	if (xa_is_value(shadow))
-		return shadow;
-	return NULL;
+void swap_table_free(struct swap_cluster_info *ci)
+{
+	kfree(ci->table);
+}
+
+static void __swap_map_set(struct swap_cluster_info *ci, pgoff_t off,
+			   swap_table_entry entry)
+{
+	atomic_long_set(&ci->table[off % SWAPFILE_CLUSTER], entry.counter);
+}
+
+static swap_table_entry __swap_map_get(struct swap_cluster_info *ci, pgoff_t off)
+{
+	swap_table_entry entry = {
+		.counter = atomic_long_read(&ci->table[off % SWAPFILE_CLUSTER])
+	};
+	return entry;
 }
 
 /*
- * add_to_swap_cache resembles filemap_add_folio on swapper_space,
- * but sets SwapCache flag and 'swap' instead of mapping and index.
+ * Swap cache entry could be a pointer (folio), 0, or a XA_VALUE (shadow).
  */
-int add_to_swap_cache(struct folio *folio, swp_entry_t entry,
-			gfp_t gfp, void **shadowp)
+static inline swap_table_entry null_to_entry(void)
 {
-	struct address_space *address_space = swap_address_space(entry);
-	pgoff_t idx = swap_cache_index(entry);
-	XA_STATE_ORDER(xas, &address_space->i_pages, idx, folio_order(folio));
-	unsigned long i, nr = folio_nr_pages(folio);
-	void *old;
+	swap_table_entry entry = ATOMIC_LONG_INIT(0);
+	return entry;
+}
 
-	xas_set_update(&xas, workingset_update_node);
+static inline bool entry_is_null(swap_table_entry entry)
+{
+	return !entry.counter;
+}
+
+static inline swap_table_entry folio_to_entry(struct folio *folio)
+{
+	BUILD_BUG_ON(sizeof(swap_table_entry) != sizeof(void*));
+	swap_table_entry entry = { .counter = (unsigned long)folio };
+	return entry;
+}
+
+static inline bool entry_is_folio(swap_table_entry entry)
+{
+	return !xa_is_value((void*)entry.counter) && !entry_is_null(entry);
+}
+
+static inline struct folio *entry_to_folio(swap_table_entry entry)
+{
+	return entry_is_folio(entry) ? (void*)entry.counter : NULL;
+}
+
+static inline swap_table_entry shadow_to_entry(void *shadow)
+{
+	BUILD_BUG_ON((BITS_PER_XA_VALUE + 1) !=
+		     BITS_PER_BYTE * sizeof(swap_table_entry));
+	swap_table_entry entry = { .counter = ((unsigned long)shadow) };
+	return entry;
+}
+
+static inline bool entry_is_shadow(swap_table_entry entry)
+{
+	return xa_is_value((void*)entry.counter);
+}
+
+static inline void *entry_to_shadow(swap_table_entry entry)
+{
+	return entry_is_shadow(entry) ? (void*)entry.counter : NULL;
+}
+
+/*
+ * For huge page splitting, override the old folio with smaller new
+ * folios, it has to be done backwardly so concurrent lookup will see
+ * the frozen old folio.
+ */
+void __swap_cache_override_folio(struct swap_cluster_info *ci, swp_entry_t entry,
+				 struct folio *old, struct folio *new)
+{
+	int nr_ents = folio_nr_pages(new);
+	pgoff_t offset = swp_offset(entry), end;
+
+	end = offset + nr_ents;
+	do {
+		VM_BUG_ON(entry_to_folio(__swap_map_get(ci, offset)) != old);
+		__swap_map_set(ci, offset, folio_to_entry(new));
+	} while (++offset < end);
+}
+
+/*
+ * For migration and shmem replacement, replace the old folio with
+ * a new one.
+ */
+int __swap_cache_replace_folio(struct swap_cluster_info *ci, swp_entry_t entry,
+			       struct folio *old, struct folio *new)
+{
+	pgoff_t i, offset, end;
+	int nr_ents = folio_nr_pages(old);
+
+	VM_BUG_ON(nr_ents != folio_nr_pages(new));
+	VM_BUG_ON(entry.val != old->swap.val || entry.val != new->swap.val);
+	VM_BUG_ON(!folio_test_locked(old) || !folio_test_locked(new));
+
+	offset = swp_offset(entry);
+	end = offset + nr_ents;
+
+	for (i = offset; i < end; i++) {
+		if (entry_to_folio(__swap_map_get(ci, i)) != old)
+			return -ENOENT;
+	}
+	for (i = offset; i < end; i++)
+		__swap_map_set(ci, i, folio_to_entry(new));
+
+	return 0;
+}
+
+int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
+			 void **shadow)
+{
+	swap_table_entry exist;
+	pgoff_t i, offset, end;
+	int type = swp_type(entry);
+	struct swap_cluster_info *ci;
+	unsigned long nr_ents = folio_nr_pages(folio);
 
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	VM_BUG_ON_FOLIO(folio_test_swapcache(folio), folio);
 	VM_BUG_ON_FOLIO(!folio_test_swapbacked(folio), folio);
 
-	folio_ref_add(folio, nr);
+	offset = swp_offset(entry);
+	end = offset + nr_ents;
+
+	ci = swap_lock_cluster(swp_type_info(type), offset);
+	for (i = offset; i < end; i++) {
+		exist = __swap_map_get(ci, i);
+		if (entry_is_folio(exist)) {
+			swap_unlock_cluster(ci);
+			return -EEXIST;
+		}
+		if (shadow && entry_is_shadow(exist))
+			*shadow = entry_to_shadow(exist);
+	};
+
+	folio_ref_add(folio, nr_ents);
 	folio_set_swapcache(folio);
 	folio->swap = entry;
 
-	do {
-		xas_lock_irq(&xas);
-		xas_create_range(&xas);
-		if (xas_error(&xas))
-			goto unlock;
-		for (i = 0; i < nr; i++) {
-			VM_BUG_ON_FOLIO(xas.xa_index != idx + i, folio);
-			if (shadowp) {
-				old = xas_load(&xas);
-				if (xa_is_value(old))
-					*shadowp = old;
-			}
-			xas_store(&xas, folio);
-			xas_next(&xas);
-		}
-		address_space->nrpages += nr;
-		__node_stat_mod_folio(folio, NR_FILE_PAGES, nr);
-		__lruvec_stat_mod_folio(folio, NR_SWAPCACHE, nr);
-unlock:
-		xas_unlock_irq(&xas);
-	} while (xas_nomem(&xas, gfp));
+	for (i = offset; i < end; i++)
+		__swap_map_set(ci, i, folio_to_entry(folio));
 
-	if (!xas_error(&xas))
-		return 0;
-
-	folio_clear_swapcache(folio);
-	folio_ref_sub(folio, nr);
-	return xas_error(&xas);
+	node_stat_mod_folio(folio, NR_FILE_PAGES, nr_ents);
+	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, nr_ents);
+	swap_unlock_cluster(ci);
+	return 0;
 }
 
 /*
- * This must be called only on folios that have
- * been verified to be in the swap cache.
+ * This must be called only on folios that have been verified to
+ * be in the swap cache and locked. It will never put the folio
+ * into the free list, the caller has a reference on the folio.
  */
-void __delete_from_swap_cache(struct folio *folio,
-			swp_entry_t entry, void *shadow)
+void __swap_cache_del_folio(swp_entry_t entry,
+			    struct folio *folio, void *shadow)
 {
-	struct address_space *address_space = swap_address_space(entry);
-	int i;
-	long nr = folio_nr_pages(folio);
-	pgoff_t idx = swap_cache_index(entry);
-	XA_STATE(xas, &address_space->i_pages, idx);
+	swap_table_entry exist;
+	int type = swp_type(entry);
+	struct swap_cluster_info *ci;
+	pgoff_t offset = swp_offset(entry), end;
+	unsigned long nr = folio_nr_pages(folio);
 
-	xas_set_update(&xas, workingset_update_node);
-
+	VM_BUG_ON(shadow && !xa_is_value(shadow));
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	VM_BUG_ON_FOLIO(!folio_test_swapcache(folio), folio);
 	VM_BUG_ON_FOLIO(folio_test_writeback(folio), folio);
 
-	for (i = 0; i < nr; i++) {
-		void *entry = xas_store(&xas, shadow);
-		VM_BUG_ON_PAGE(entry != folio, entry);
-		xas_next(&xas);
-	}
+	ci = swp_offset_cluster(swp_type_info(type), offset);
+	end = offset + nr;
+	do {
+		exist = __swap_map_get(ci, offset);
+		VM_BUG_ON(entry_to_folio(exist) != folio);
+		__swap_map_set(ci, offset, shadow_to_entry(shadow));
+	} while (++offset < end);
+
 	folio->swap.val = 0;
 	folio_clear_swapcache(folio);
-	address_space->nrpages -= nr;
-	__node_stat_mod_folio(folio, NR_FILE_PAGES, -nr);
-	__lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr);
+	node_stat_mod_folio(folio, NR_FILE_PAGES, -nr);
+	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr);
 }
 
-struct folio *swap_cache_get_folio(swp_entry_t entry)
-{
-	struct folio *folio = filemap_get_folio(swap_address_space(entry),
-						swap_cache_index(entry));
-	if (!IS_ERR(folio))
-		return folio;
-	return NULL;
-}
-
-/*
- * This must be called only on folios that have
- * been verified to be in the swap cache and locked.
- * It will never put the folio into the free list,
- * the caller has a reference on the folio.
- */
 void delete_from_swap_cache(struct folio *folio)
 {
+	struct swap_cluster_info *ci;
 	swp_entry_t entry = folio->swap;
-	struct address_space *address_space = swap_address_space(entry);
 
-	xa_lock_irq(&address_space->i_pages);
-	__delete_from_swap_cache(folio, entry, NULL);
-	xa_unlock_irq(&address_space->i_pages);
+	ci = swap_lock_cluster(swp_info(entry), swp_offset(entry));
+	__swap_cache_del_folio(entry, folio, NULL);
+	swap_unlock_cluster(ci);
 
 	put_swap_folio(folio, entry);
 	folio_ref_sub(folio, folio_nr_pages(folio));
 }
 
-void clear_shadow_from_swap_cache(int type, unsigned long begin,
-				unsigned long end)
+void *swap_cache_get_shadow(swp_entry_t entry)
 {
-	unsigned long curr = begin;
-	void *old;
+	pgoff_t offset = swp_offset(entry);
+	return entry_to_shadow(__swap_map_get(swp_cluster(entry), offset));
+}
 
-	for (;;) {
-		swp_entry_t entry = swp_entry(type, curr);
-		unsigned long index = curr & SWAP_ADDRESS_SPACE_MASK;
-		struct address_space *address_space = swap_address_space(entry);
-		XA_STATE(xas, &address_space->i_pages, index);
+void __swap_cache_clear_shadow(swp_entry_t entry, int nr_ents)
+{
+	struct swap_cluster_info *ci;
+	pgoff_t offset = swp_offset(entry), end;
 
-		xas_set_update(&xas, workingset_update_node);
+	ci = swp_offset_cluster(swp_info(entry), offset);
+	end = offset + nr_ents;
+	do {
+		VM_BUG_ON(entry_to_folio(__swap_map_get(ci, offset)));
+		__swap_map_set(ci, offset, null_to_entry());
+	} while (++offset < end);
+}
 
-		xa_lock_irq(&address_space->i_pages);
-		xas_for_each(&xas, old, min(index + (end - curr), SWAP_ADDRESS_SPACE_PAGES)) {
-			if (!xa_is_value(old))
-				continue;
-			xas_store(&xas, NULL);
-		}
-		xa_unlock_irq(&address_space->i_pages);
-
-		/* search the next swapcache until we meet end */
-		curr = ALIGN((curr + 1), SWAP_ADDRESS_SPACE_PAGES);
-		if (curr > end)
-			break;
-	}
+/*
+ * An speculative swap cache look up, user have to pin the
+ * device with get_swap_device.
+ */
+struct folio *swap_cache_get_folio(swp_entry_t entry)
+{
+	struct folio *folio;
+	folio = entry_to_folio(__swap_map_get(swp_cluster(entry),
+					      swp_offset(entry)));
+	if (folio && folio_try_get(folio))
+		return folio;
+	return NULL;
 }
 
 /*
@@ -385,7 +476,7 @@ struct folio *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 			goto put_and_return;
 
 		/*
-		 * We might race against __delete_from_swap_cache(), and
+		 * We might race against __swap_cache_del_folio(), and
 		 * stumble across a swap_map entry whose SWAP_HAS_CACHE
 		 * has not yet been cleared.  Or race against another
 		 * __read_swap_cache_async(), which has set SWAP_HAS_CACHE
@@ -403,8 +494,7 @@ struct folio *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 	if (mem_cgroup_swapin_charge_folio(new_folio, NULL, gfp_mask, entry))
 		goto fail_unlock;
 
-	/* May fail (-ENOMEM) if XArray node allocation failed. */
-	if (add_to_swap_cache(new_folio, entry, gfp_mask & GFP_RECLAIM_MASK, &shadow))
+	if (swap_cache_add_folio(entry, new_folio, &shadow))
 		goto fail_unlock;
 
 	memcg1_swapin(entry, 1);
@@ -598,41 +688,6 @@ skip:
 	return folio;
 }
 
-int init_swap_address_space(unsigned int type, unsigned long nr_pages)
-{
-	struct address_space *spaces, *space;
-	unsigned int i, nr;
-
-	nr = DIV_ROUND_UP(nr_pages, SWAP_ADDRESS_SPACE_PAGES);
-	spaces = kvcalloc(nr, sizeof(struct address_space), GFP_KERNEL);
-	if (!spaces)
-		return -ENOMEM;
-	for (i = 0; i < nr; i++) {
-		space = spaces + i;
-		xa_init_flags(&space->i_pages, XA_FLAGS_LOCK_IRQ);
-		atomic_set(&space->i_mmap_writable, 0);
-		space->a_ops = &swap_aops;
-		/* swap cache doesn't use writeback related tags */
-		mapping_set_no_writeback_tags(space);
-	}
-	nr_swapper_spaces[type] = nr;
-	swapper_spaces[type] = spaces;
-
-	return 0;
-}
-
-void exit_swap_address_space(unsigned int type)
-{
-	int i;
-	struct address_space *spaces = swapper_spaces[type];
-
-	for (i = 0; i < nr_swapper_spaces[type]; i++)
-		VM_WARN_ON_ONCE(!mapping_empty(&spaces[i]));
-	kvfree(spaces);
-	nr_swapper_spaces[type] = 0;
-	swapper_spaces[type] = NULL;
-}
-
 static int swap_vma_ra_win(struct vm_fault *vmf, unsigned long *start,
 			   unsigned long *end)
 {
@@ -820,6 +875,7 @@ static int __init swap_init_sysfs(void)
 		pr_err("failed to register swap group\n");
 		goto delete_obj;
 	}
+	mapping_set_no_writeback_tags(&swap_space);
 	return 0;
 
 delete_obj:
