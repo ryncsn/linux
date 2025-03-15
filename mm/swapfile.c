@@ -1390,7 +1390,7 @@ static unsigned char swap_entry_put_locked(struct swap_info_struct *si,
  *   CPU1				CPU2
  *   do_swap_page()
  *     ...				swapoff+swapon
- *     __read_swap_cache_async()
+ *     __swapin_cache_alloc()
  *       swapcache_prepare()
  *         __swap_duplicate()
  *           // check swap_map
