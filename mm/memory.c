@@ -4476,7 +4476,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	if (unlikely(!si))
 		goto out;
 
-	folio = swap_cache_get_folio(entry, vma, vmf->address);
+	folio = swap_cache_get_folio(entry);
 	if (folio)
 		page = folio_file_page(folio, swp_offset(entry));
 	swapcache = folio;
@@ -4558,6 +4558,9 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 		ret = VM_FAULT_HWPOISON;
 		goto out_release;
 	}
+
+	if (folio_test_readahead(folio))
+		swap_update_readahead(folio, vma, vmf->address);
 
 	ret |= folio_lock_or_retry(folio, vmf);
 	if (ret & VM_FAULT_RETRY)
