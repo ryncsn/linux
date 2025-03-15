@@ -2259,7 +2259,9 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 	}
 
 	/* Look it up and read it in.. */
-	folio = swap_cache_get_folio(swap, NULL, 0);
+	folio = swap_cache_get_folio(swap);
+	if (folio)
+		swap_update_readahead(folio, NULL, 0);
 	order = xa_get_order(&mapping->i_pages, index);
 	if (!folio) {
 		bool fallback_order0 = false;
@@ -2350,7 +2352,6 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 			swap = swp_entry(swp_type(swap), swp_offset(swap) + offset);
 		}
 	}
-
 alloced:
 	/* We have to do this with folio locked to prevent races */
 	folio_lock(folio);
