@@ -62,8 +62,7 @@ static unsigned char mincore_swap(swp_entry_t entry)
 	/* Prevent swap device to being swapoff under us */
 	si = get_swap_device(entry);
 	if (si) {
-		folio = filemap_get_folio(swap_address_space(entry),
-					  swap_cache_index(entry));
+		folio = swap_cache_get_folio(entry);
 		put_swap_device(si);
 	}
 	if (folio) {
