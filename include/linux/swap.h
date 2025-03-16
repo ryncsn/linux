@@ -244,8 +244,14 @@ enum {
 
 #ifdef CONFIG_THP_SWAP
 #define SWAP_NR_ORDERS		(PMD_ORDER + 1)
+/*
+ * PMD_SIZE allocation consumes whole cluster, it never go to
+ * partial lists (nonfull, frag).
+ */
+#define SWAP_NR_PARTIAL_ORDERS	(PMD_ORDER)
 #else
 #define SWAP_NR_ORDERS		1
+#define SWAP_NR_PARTIAL_ORDERS	1
 #endif
 
 /*
@@ -271,11 +277,11 @@ struct swap_info_struct {
 	struct swap_cluster_info *cluster_info; /* cluster info. Only for SSD */
 	struct list_head free_clusters; /* free clusters list */
 	struct list_head full_clusters; /* full clusters list */
-	struct list_head nonfull_clusters[SWAP_NR_ORDERS];
+	struct list_head nonfull_clusters[SWAP_NR_PARTIAL_ORDERS];
 					/* list of cluster that contains at least one free slot */
-	struct list_head frag_clusters[SWAP_NR_ORDERS];
+	struct list_head frag_clusters[SWAP_NR_PARTIAL_ORDERS];
 					/* list of cluster that are fragmented or contented */
-	atomic_long_t frag_cluster_nr[SWAP_NR_ORDERS];
+	atomic_long_t frag_cluster_nr[SWAP_NR_PARTIAL_ORDERS];
 	unsigned int pages;		/* total of usable pages of swap */
 	atomic_long_t inuse_pages;	/* number of those currently in use */
 	struct swap_sequential_cluster *global_cluster; /* Use one global cluster for rotating device */
