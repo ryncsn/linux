@@ -145,7 +145,7 @@ extern int swap_table_alloc(struct swap_cluster_info *ci);
 extern void swap_table_free(struct swap_cluster_info *ci);
 extern struct folio *swap_cache_get_folio(swp_entry_t entry);
 extern int swap_cache_add_folio(swp_entry_t entry,
-				struct folio *folio, void **shadow);
+				struct folio *folio, void **shadow, bool swapin);
 extern void __swap_cache_del_folio(swp_entry_t entry,
 				   struct folio *folio, void *shadow);
 extern int __swap_cache_replace_folio(struct swap_cluster_info *ci,

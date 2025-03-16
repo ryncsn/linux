@@ -1231,9 +1231,12 @@ int folio_alloc_swap(struct folio *folio, gfp_t gfp)
 	unsigned int order = folio_order(folio);
 	unsigned int size = 1 << order;
 	swp_entry_t entry = {};
+	struct folio *exist;
+	int err;
 
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	VM_BUG_ON_FOLIO(!folio_test_uptodate(folio), folio);
+	VM_BUG_ON_FOLIO(folio_test_swapcache(folio), folio);
 
 	/*
 	 * Should not even be attempting large allocations when huge
@@ -1264,8 +1267,20 @@ int folio_alloc_swap(struct folio *folio, gfp_t gfp)
 	 * TODO: this could cause a theoretical memory reclaim
 	 * deadlock in the swap out path.
 	 */
-	if (swap_cache_add_folio(entry, folio, NULL))
+retry_cache:
+	err = swap_cache_add_folio(entry, folio, NULL, false);
+	if (err) {
+		/* If raced with readahead, wait a bit */
+		if (err == -EEXIST) {
+			exist = swap_cache_get_folio(entry);
+			if (exist) {
+				folio_wait_locked(exist);
+				folio_put(exist);
+			}
+			goto retry_cache;
+		}
 		goto out_free;
+	}
 
 	atomic_long_sub(size, &nr_swap_pages);
 	return 0;
