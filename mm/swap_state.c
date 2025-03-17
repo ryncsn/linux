@@ -102,8 +102,27 @@ static swap_table_entry __swap_map_get(struct swap_cluster_info *ci, pgoff_t off
 }
 
 /*
- * Swap cache entry could be a pointer (folio), 0, or a XA_VALUE (shadow).
+ * Swap table entry type and bit layouts:
+ * NULL:     | ------------    0   -------------|
+ * XA_VALUE: | SWAP_COUNT |----- Shadow ------|1|
+ * PFN:      | SWAP_COUNT |------ PFN -------|10|
+ * Pointer:  |----------- Pointer ----------|100|
+ *
+ * Swap table entry type and info:
+ * NULL:     Swap Entry is unused
+ * XA_VALUE: Swap Entry is a shadow in XA_VALUE format, with memcg
+ *           data embedded in shadow.
+ * PFN:      Swap Entry is in cache, memcg data in folio.
+ * Pointer:  (Reserved for other components)
  */
+#define ENTRY_COUNT_BITS	BITS_PER_BYTE
+#define ENTRY_PFN_MARK		0b10UL
+#define ENTRY_PFN_LOW_MASK	0b11UL
+#define ENTRY_PFN_SHIFT		2
+#define ENTRY_PFN_MASK		((~0UL) >> ENTRY_COUNT_BITS)
+#define ENTRY_COUNT_MASK	(~((~0UL) >> ENTRY_COUNT_BITS))
+#define ENTRY_COUNT_SHIFT	(BITS_PER_LONG - BITS_PER_BYTE)
+
 static inline swap_table_entry null_to_entry(void)
 {
 	swap_table_entry entry = ATOMIC_LONG_INIT(0);
@@ -117,19 +136,25 @@ static inline bool entry_is_null(swap_table_entry entry)
 
 static inline swap_table_entry folio_to_entry(struct folio *folio)
 {
-	BUILD_BUG_ON(sizeof(swap_table_entry) != sizeof(void*));
-	swap_table_entry entry = { .counter = (unsigned long)folio };
+	BUILD_BUG_ON(sizeof(swap_table_entry) != sizeof(unsigned long));
+	BUILD_BUG_ON((MAX_POSSIBLE_PHYSMEM_BITS - PAGE_SHIFT) >
+		     (BITS_PER_LONG - ENTRY_PFN_SHIFT - ENTRY_COUNT_BITS));
+	swap_table_entry entry = {
+		.counter = (folio_pfn(folio) << ENTRY_PFN_SHIFT) | ENTRY_PFN_MARK
+	};
 	return entry;
 }
 
 static inline bool entry_is_folio(swap_table_entry entry)
 {
-	return !xa_is_value((void*)entry.counter) && !entry_is_null(entry);
+	return ((entry.counter & ENTRY_PFN_LOW_MASK) == ENTRY_PFN_MARK);
 }
 
 static inline struct folio *entry_to_folio(swap_table_entry entry)
 {
-	return entry_is_folio(entry) ? (void*)entry.counter : NULL;
+	if (!entry_is_folio(entry))
+		return NULL;
+	return pfn_folio((entry.counter & ENTRY_PFN_MASK) >> ENTRY_PFN_SHIFT);
 }
 
 static inline swap_table_entry shadow_to_entry(void *shadow)
@@ -148,6 +173,21 @@ static inline bool entry_is_shadow(swap_table_entry entry)
 static inline void *entry_to_shadow(swap_table_entry entry)
 {
 	return entry_is_shadow(entry) ? (void*)entry.counter : NULL;
+}
+
+static inline unsigned char entry_get_count(swap_table_entry entry)
+{
+	if (!entry_is_shadow(entry) && !entry_is_folio(entry))
+		return 0;
+	return (entry.counter & ENTRY_COUNT_MASK >> ENTRY_COUNT_SHIFT);
+}
+
+static inline swap_table_entry entry_set_count(swap_table_entry entry,
+					       unsigned char count)
+{
+	entry.counter &= ~ENTRY_COUNT_MASK;
+	entry.counter |= ((unsigned long)count) << ENTRY_COUNT_SHIFT;
+	return entry;
 }
 
 /*
