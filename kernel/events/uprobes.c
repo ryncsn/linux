@@ -18,7 +18,7 @@
 #include <linux/export.h>
 #include <linux/rmap.h>		/* anon_vma_prepare */
 #include <linux/mmu_notifier.h>
-#include <linux/swap.h>		/* folio_free_swap */
+#include <linux/swap.h>		/* folio_reclaim_swap */
 #include <linux/ptrace.h>	/* user_enable_single_step */
 #include <linux/kdebug.h>	/* notifier mechanism */
 #include <linux/percpu-rwsem.h>
@@ -185,7 +185,7 @@ static int __replace_page(struct vm_area_struct *vma, unsigned long addr,
 			return err;
 	}
 
-	/* For folio_free_swap() below */
+	/* For folio_reclaim_swap() below */
 	folio_lock(old_folio);
 
 	mmu_notifier_invalidate_range_start(&range);
@@ -225,7 +225,7 @@ static int __replace_page(struct vm_area_struct *vma, unsigned long addr,
 
 	folio_remove_rmap_pte(old_folio, old_page, vma);
 	if (!folio_mapped(old_folio))
-		folio_free_swap(old_folio);
+		folio_reclaim_swap(old_folio);
 	page_vma_mapped_walk_done(&pvmw);
 	folio_put(old_folio);
 
