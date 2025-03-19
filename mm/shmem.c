@@ -1974,14 +1974,12 @@ unlock:
 	return ERR_PTR(error);
 }
 
-static struct folio *shmem_swap_alloc_folio(struct inode *inode,
+static struct folio *shmem_swapin_folio_order(struct inode *inode,
 		struct vm_area_struct *vma, pgoff_t index,
 		swp_entry_t entry, int order, gfp_t gfp)
 {
 	struct shmem_inode_info *info = SHMEM_I(inode);
-	struct folio *new;
-	void *shadow;
-	int nr_pages;
+	struct folio *new, *swapcache;
 
 	/*
 	 * We have arrived here because our zones are constrained, so don't
@@ -1996,41 +1994,19 @@ static struct folio *shmem_swap_alloc_folio(struct inode *inode,
 
 	new = shmem_alloc_folio(gfp, order, info, index);
 	if (!new)
-		return ERR_PTR(-ENOMEM);
+		return NULL;
 
-	nr_pages = folio_nr_pages(new);
 	if (mem_cgroup_swapin_charge_folio(new, vma ? vma->vm_mm : NULL,
-					   gfp, entry)) {
+				gfp, entry)) {
 		folio_put(new);
-		return ERR_PTR(-ENOMEM);
+		return NULL;
 	}
 
-	/*
-	 * Prevent parallel swapin from proceeding with the swap cache flag.
-	 *
-	 * Of course there is another possible concurrent scenario as well,
-	 * that is to say, the swap cache flag of a large folio has already
-	 * been set by swapcache_prepare(), while another thread may have
-	 * already split the large swap entry stored in the shmem mapping.
-	 * In this case, shmem_add_to_page_cache() will help identify the
-	 * concurrent swapin and return -EEXIST.
-	 */
-	if (swapcache_prepare(entry, nr_pages)) {
+	swapcache = swapin_entry(entry, new);
+	if (swapcache != new)
 		folio_put(new);
-		return ERR_PTR(-EEXIST);
-	}
 
-	__folio_set_locked(new);
-	__folio_set_swapbacked(new);
-	new->swap = entry;
-
-	memcg1_swapin(entry, nr_pages);
-	shadow = swap_cache_get_shadow(entry);
-	if (shadow)
-		workingset_refault(new, shadow);
-	folio_add_lru(new);
-	swap_read_folio(new, NULL);
-	return new;
+	return swapcache;
 }
 
 /*
@@ -2123,8 +2099,7 @@ static int shmem_replace_folio(struct folio **foliop, gfp_t gfp,
 }
 
 static void shmem_set_folio_swapin_error(struct inode *inode, pgoff_t index,
-					 struct folio *folio, swp_entry_t swap,
-					 bool skip_swapcache)
+					 struct folio *folio, swp_entry_t swap)
 {
 	struct address_space *mapping = inode->i_mapping;
 	swp_entry_t swapin_error;
@@ -2140,8 +2115,7 @@ static void shmem_set_folio_swapin_error(struct inode *inode, pgoff_t index,
 
 	nr_pages = folio_nr_pages(folio);
 	folio_wait_writeback(folio);
-	if (!skip_swapcache)
-		delete_from_swap_cache(folio);
+	delete_from_swap_cache(folio);
 	/*
 	 * Don't treat swapin error folio as alloced. Otherwise inode->i_blocks
 	 * won't be 0 when inode is released and thus trigger WARN_ON(i_blocks)
@@ -2242,7 +2216,6 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 	struct shmem_inode_info *info = SHMEM_I(inode);
 	struct swap_info_struct *si;
 	struct folio *folio = NULL;
-	bool skip_swapcache = false;
 	swp_entry_t swap;
 	int error, nr_pages, order, split_order;
 
@@ -2283,25 +2256,16 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 				  !zswap_never_enabled()))
 			fallback_order0 = true;
 
-		/* Skip swapcache for synchronous device. */
+		/* Try mTHP swapin for synchronous device. */
 		if (!fallback_order0 && data_race(si->flags & SWP_SYNCHRONOUS_IO)) {
-			folio = shmem_swap_alloc_folio(inode, vma, index, swap, order, gfp);
-			if (!IS_ERR(folio)) {
-				skip_swapcache = true;
+			folio = shmem_swapin_folio_order(inode, vma, index, swap, order, gfp);
+			if (folio)
 				goto alloced;
-			}
-
-			/*
-			 * Fallback to swapin order-0 folio unless the swap entry
-			 * already exists.
-			 */
-			error = PTR_ERR(folio);
-			folio = NULL;
-			if (error == -EEXIST)
-				goto failed;
 		}
 
 		/*
+		 * Fallback to swapin order-0 folio.
+		 *
 		 * Now swap device can only swap in order 0 folio, then we
 		 * should split the large swap entry stored in the pagecache
 		 * if necessary.
@@ -2348,7 +2312,7 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 alloced:
 	/* We have to do this with folio locked to prevent races */
 	folio_lock(folio);
-	if (!folio_swap_contains(folio, swap, skip_swapcache)) {
+	if (!folio_swap_contains(folio, swap)) {
 		error = -EEXIST;
 		goto unlock;
 	}
@@ -2390,12 +2354,7 @@ alloced:
 	if (sgp == SGP_WRITE)
 		folio_mark_accessed(folio);
 
-	if (skip_swapcache) {
-		folio->swap.val = 0;
-		swapcache_clear(si, swap, nr_pages);
-	} else {
-		delete_from_swap_cache(folio);
-	}
+	delete_from_swap_cache(folio);
 	folio_mark_dirty(folio);
 	swap_free_nr(swap, nr_pages);
 	put_swap_device(si);
@@ -2406,11 +2365,8 @@ failed:
 	if (!shmem_confirm_swap(mapping, index, swap, 1))
 		error = -EEXIST;
 	if (error == -EIO)
-		shmem_set_folio_swapin_error(inode, index, folio, swap,
-					     skip_swapcache);
+		shmem_set_folio_swapin_error(inode, index, folio, swap);
 unlock:
-	if (skip_swapcache)
-		swapcache_clear(si, swap, folio_nr_pages(folio));
 	if (folio) {
 		folio_unlock(folio);
 		folio_put(folio);
