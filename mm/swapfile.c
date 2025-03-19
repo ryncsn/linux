@@ -2296,7 +2296,7 @@ retry:
 
 		entry = swp_entry(type, i);
 		folio = swap_cache_get_folio(entry);
-		if (IS_ERR(folio))
+		if (!folio)
 			continue;
 
 		/*
