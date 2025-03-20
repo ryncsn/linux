@@ -252,14 +252,13 @@ int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
 	end = offset + nr_ents;
 
 	ci = swap_lock_cluster(swp_type_info(type), offset);
-	if (swapin) {
-		for (i = offset; i < end; i++) {
-			if (!__swap_count(swp_entry(type, i))) {
-				swap_unlock_cluster(ci);
-				return -EINVAL;
-			}
+	for (i = offset; i < end; i++) {
+		if (!__swap_count(swp_entry(type, i))) {
+			swap_unlock_cluster(ci);
+			return -EINVAL;
 		}
 	}
+
 	for (i = offset; i < end; i++) {
 		exist = __swap_map_get(ci, i);
 		if (entry_is_folio(exist)) {
@@ -301,6 +300,7 @@ void __swap_cache_del_folio(swp_entry_t entry,
 	swap_table_entry exist;
 	int type = swp_type(entry);
 	struct swap_cluster_info *ci;
+	bool folio_swapped = false, need_free = false;
 	pgoff_t offset = swp_offset(entry), end;
 	unsigned long nr = folio_nr_pages(folio);
 
@@ -315,12 +315,29 @@ void __swap_cache_del_folio(swp_entry_t entry,
 		exist = __swap_map_get(ci, offset);
 		VM_BUG_ON(entry_to_folio(exist) != folio);
 		__swap_map_set(ci, offset, shadow_to_entry(shadow));
+		if (__swap_count(swp_entry(type, offset)))
+			folio_swapped = true;
+		else
+			need_free = true;
 	} while (++offset < end);
 
 	folio->swap.val = 0;
 	folio_clear_swapcache(folio);
 	node_stat_mod_folio(folio, NR_FILE_PAGES, -nr);
 	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr);
+
+	if (!folio_swapped) {
+		swap_entries_free(swp_info(entry), ci, entry, nr);
+	} else if (need_free) {
+		offset = swp_offset(entry);
+		while (nr--) {
+			if (!__swap_count(swp_entry(type, offset))) {
+				swap_entries_free(swp_info(entry), ci,
+						  swp_entry(type, offset), 1);
+			}
+			offset++;
+		}
+	}
 }
 
 void delete_from_swap_cache(struct folio *folio)
@@ -332,7 +349,6 @@ void delete_from_swap_cache(struct folio *folio)
 	__swap_cache_del_folio(entry, folio, NULL);
 	swap_unlock_cluster(ci);
 
-	put_swap_folio(folio, entry);
 	folio_ref_sub(folio, folio_nr_pages(folio));
 }
 
@@ -354,6 +370,12 @@ void __swap_cache_clear_shadow(swp_entry_t entry, int nr_ents)
 			continue;
 		__swap_map_set(ci, offset, null_to_entry());
 	} while (++offset < end);
+}
+
+/* An racy check if an entry is in swap cache. */
+bool __swap_has_cache(struct swap_cluster_info *ci, pgoff_t offset)
+{
+	return !!entry_to_folio(__swap_map_get(ci, offset));
 }
 
 /*
@@ -481,7 +503,6 @@ static struct folio *__swapin_cache_add_prepare(swp_entry_t entry,
 	int err;
 	void *shadow = NULL;
 	struct folio *exist = NULL;
-	struct swap_cluster_info *ci;
 
 	/*
 	 * The swap entry is ours to swap in. Prepare the new folio.
@@ -509,14 +530,6 @@ retry_cache:
 		return NULL;
 	}
 
-	/*
-	 * Ensure the swap entry isn't gone while HAS_CACHE is not set,
-	 * also set HAS_CACHE to prevent the entries from being freed.
-	 * TODO: This is no longer needed once HAS_CACHE is gone.
-	 */
-	if (swapcache_prepare(entry, folio_nr_pages(folio)))
-		goto fail_unlock;
-
 	memcg1_swapin(entry, 1);
 
 	if (shadow)
@@ -525,18 +538,6 @@ retry_cache:
 	/* Caller will initiate read into locked new_folio */
 	folio_add_lru(folio);
 	return folio;
-
-fail_unlock:
-	/*
-	 * Failed to set HAS_CACHE after adding to swap cache,
-	 * clean it up manually.
-	 */
-	ci = swap_lock_cluster(swp_info(entry), swp_offset(entry));
-	__swap_cache_del_folio(entry, folio, NULL);
-	swap_unlock_cluster(ci);
-	folio_ref_sub(folio, folio_nr_pages(folio));
-	folio_unlock(folio);
-	return NULL;
 }
 
 struct folio *__swapin_cache_alloc(swp_entry_t entry, gfp_t gfp_mask,

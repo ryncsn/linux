@@ -4230,7 +4230,7 @@ static struct folio *__alloc_swap_folio(struct vm_fault *vmf)
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 static inline int non_swapcache_batch(swp_entry_t entry, int max_nr)
 {
-	struct swap_info_struct *si = swp_swap_info(entry);
+	struct swap_info_struct *si = swp_info(entry);
 	pgoff_t offset = swp_offset(entry);
 	int i;
 
@@ -4241,7 +4241,7 @@ static inline int non_swapcache_batch(swp_entry_t entry, int max_nr)
 	 * swap devices while the content is in swapcache.
 	 */
 	for (i = 0; i < max_nr; i++) {
-		if ((si->swap_map[offset + i] & SWAP_HAS_CACHE))
+		if ((__swap_has_cache(swp_offset_cluster(si, offset), offset + i)))
 			return i;
 	}
 
