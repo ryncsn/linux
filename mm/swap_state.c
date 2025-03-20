@@ -224,7 +224,14 @@ int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
 		exist = __swap_map_get(ci, i);
 		if (entry_is_folio(exist)) {
 			swap_unlock_cluster(ci);
-			return -EEXIST;
+			/*
+			 * In case a of large folio being blocked
+			 * by a smaller folio, return a different error.
+			 */
+			if (offset == swp_offset(entry))
+				return -EEXIST;
+			else
+				return -EAGAIN;
 		}
 		if (shadow && entry_is_shadow(exist))
 			*shadow = entry_to_shadow(exist);
@@ -450,6 +457,10 @@ retry_cache:
 			if (exist) {
 				/* Wait a bit to prevent repeated page fault */
 				folio_wait_locked(exist);
+				if (folio_test_swapcache(exist)) {
+					__folio_clear_locked(folio);
+					return exist;
+				}
 				folio_put(exist);
 			}
 			goto retry_cache;
