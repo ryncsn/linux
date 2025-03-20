@@ -35,6 +35,7 @@ struct swap_cluster_info {
 	u8 flags;
 	u8 order;
 	swp_table_ent_t *table;
+	unsigned long *extend_table; /* Only used for extended swap count */
 	struct list_head list;
 };
 
@@ -160,6 +161,21 @@ static inline struct address_space *swap_address_space(swp_entry_t entry)
 {
 	return &swap_space;
 }
+
+static inline unsigned char swap_count(unsigned char ent)
+{
+	return ent & ~SWAP_HAS_CACHE;•  /* may include COUNT_CONTINUED flag */
+}
+
+extern int __swap_table_set_count(struct swap_cluster_info *ci, pgoff_t offset, unsigned long val);
+extern int swap_table_set_count(swp_entry_t entry, unsigned long val, int nr);
+extern unsigned char __swap_table_get_count_raw(struct swap_cluster_info *ci, pgoff_t offset);
+extern unsigned long __swap_table_get_count(struct swap_cluster_info *ci, pgoff_t offset);
+extern unsigned long swap_table_get_count(swp_entry_t entry);
+extern int swap_table_set_count(swp_entry_t entry, unsigned long val, int nr);
+extern unsigned long swap_table_get_count_fast(swp_entry_t entry);
+extern int swap_table_inc_count(swp_entry_t entry);
+extern unsigned long swap_table_dec_count(swp_entry_t entry);
 
 extern struct folio *swap_cache_get_folio(swp_entry_t entry);
 extern int swap_cache_add_folio(swp_entry_t entry,
