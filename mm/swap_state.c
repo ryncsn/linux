@@ -87,6 +87,113 @@ void swap_table_free(struct swap_cluster_info *ci)
 	kfree(ci->table);
 }
 
+int __swap_table_set_count(struct swap_cluster_info *ci, pgoff_t offset,
+			   unsigned long val)
+{
+	offset %= SWAPFILE_CLUSTER;
+	swap_table_entry entry = __swap_map_get(ci, offset);
+
+	if (val >= ENTRY_COUNT_MAX) {
+		if (!ci->extend_table) {
+			ci->extend_table = kzalloc(sizeof(unsigned long) *
+						   SWAPFILE_CLUSTER,
+						   GFP_KERNEL);
+			if (!ci->extend_table)
+				return -ENOMEM;
+		}
+		ci->extend_table[offset] = val;
+		/* Just a hint for swap_table_get_count_fast */
+		val = ENTRY_COUNT_MAX - 1;
+	}
+
+	__swap_map_set(ci, offset, entry_set_count(entry, val));
+	return 0;
+}
+
+int swap_table_set_count(swp_entry_t entry, unsigned long val, int nr)
+{
+	int ret;
+	struct swap_cluster_info *ci;
+
+	ci = swap_lock_cluster(swp_info(entry), swp_offset(entry));
+	while (nr--)
+		ret = __swap_table_set_count(ci, swp_offset(entry) + nr, val);
+	swap_unlock_cluster(ci);
+
+	return ret;
+}
+
+unsigned char __swap_table_get_count_raw(struct swap_cluster_info *ci,
+					 pgoff_t offset)
+{
+	swap_table_entry entry = __swap_map_get(ci, offset);
+	return entry_get_count(entry);
+}
+
+unsigned long __swap_table_get_count(struct swap_cluster_info *ci,
+				     pgoff_t offset)
+{
+	offset %= SWAPFILE_CLUSTER;
+	swap_table_entry entry = __swap_map_get(ci, offset);
+	unsigned long val = entry_get_count(entry);
+
+	if (val == ENTRY_COUNT_MAX) {
+		if (WARN_ON(!ci->extend_table))
+			return ENTRY_COUNT_MAX;
+		val = ci->extend_table[offset];
+	}
+
+	return val;
+}
+
+unsigned long swap_table_get_count_fast(swp_entry_t entry)
+{
+	return entry_get_count(__swap_map_get(swp_cluster(entry),
+					      swp_offset(entry)));
+}
+
+unsigned long swap_table_get_count(swp_entry_t entry)
+{
+	unsigned long ret;
+	struct swap_cluster_info *ci;
+
+	ci = swap_lock_cluster(swp_info(entry), swp_offset(entry));
+	ret = __swap_table_get_count(ci, swp_offset(entry));
+	swap_unlock_cluster(ci);
+
+	return ret;
+}
+
+int swap_table_inc_count(swp_entry_t entry)
+{
+	int ret;
+	unsigned long val;
+	struct swap_cluster_info *ci;
+
+	ci = swap_lock_cluster(swp_info(entry), swp_offset(entry));
+	val = __swap_table_get_count(ci, swp_offset(entry));
+	ret = __swap_table_set_count(ci, swp_offset(entry), val + 1);
+	swap_unlock_cluster(ci);
+
+	return ret;
+}
+
+unsigned long swap_table_dec_count(swp_entry_t entry)
+{
+	unsigned long val;
+	struct swap_cluster_info *ci;
+
+	ci = swap_lock_cluster(swp_info(entry), swp_offset(entry));
+	val = __swap_table_get_count(ci, swp_offset(entry));
+	if (!WARN_ON(!val)) {
+		val -= 1;
+		WARN_ON(__swap_table_set_count(ci, swp_offset(entry), val - 1));
+	}
+	swap_unlock_cluster(ci);
+
+	return val;
+}
+
 /*
  * For huge page splitting, override the old folio with smaller new
  * folios, it has to be done backwardly so concurrent lookup will see
