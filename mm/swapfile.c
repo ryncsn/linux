@@ -163,9 +163,11 @@ static bool swap_only_has_cache(struct swap_info_struct *si,
 {
 	unsigned char *map = si->swap_map + offset;
 	unsigned char *map_end = map + nr_pages;
+	swap_table_entry entry;
 
 	do {
-		VM_BUG_ON(!__swap_has_cache(swp_offset_cluster(si, offset), offset));
+		entry = __swap_map_get(swp_offset_cluster(si, offset), offset);
+		VM_BUG_ON(!entry_is_folio(entry));
 		if (*map)
 			return false;
 		offset++;
@@ -180,16 +182,19 @@ static bool swap_is_last_map(struct swap_info_struct *si,
 	unsigned char *map = si->swap_map + offset;
 	unsigned char *map_end = map + nr_pages;
 	unsigned char count = *map;
+	swap_table_entry entry;
 
 	if (count != 1 && count != SWAP_MAP_SHMEM)
 		return false;
 
-	*has_cache = __swap_has_cache(swp_offset_cluster(si, offset), offset);
+	entry = __swap_map_get(swp_offset_cluster(si, offset), offset);
+	*has_cache = entry_is_folio(entry);
 	while (++map < map_end) {
 		++offset;
 		if (*map != count)
 			return false;
-		if (*has_cache != __swap_has_cache(swp_offset_cluster(si, offset), offset))
+		entry = __swap_map_get(swp_offset_cluster(si, offset), offset);
+		if (*has_cache != entry_is_folio(entry))
 			return false;
 	}
 
@@ -668,7 +673,7 @@ out:
 	 * could have been be freed while we are not holding the lock.
 	 */
 	for (offset = start; offset < end; offset++)
-		if (map[offset] || __swap_has_cache(ci, offset))
+		if (map[offset] || entry_is_folio(__swap_map_get(ci, offset)))
 			return false;
 
 	return true;
@@ -688,7 +693,7 @@ static bool cluster_scan_range(struct swap_info_struct *si,
 	for (offset = start; offset < end; offset++) {
 		if (map[offset])
 			return false;
-		if (__swap_has_cache(ci, offset)) {
+		if (entry_is_folio(__swap_map_get(ci, offset))) {
 			if (!vm_swap_full())
 				return false;
 			*need_reclaim = true;
@@ -798,7 +803,7 @@ static void swap_reclaim_full_clusters(struct swap_info_struct *si, bool force)
 		to_scan--;
 
 		while (offset < end) {
-			if (!map[offset] && __swap_has_cache(ci, offset)) {
+			if (!map[offset] && entry_is_folio(__swap_map_get(ci, offset))) {
 				spin_unlock(&ci->lock);
 				nr_reclaim = __try_to_reclaim_swap(si, offset,
 								   TTRS_ANYWAY);
@@ -1346,7 +1351,7 @@ static unsigned char swap_entry_put_locked(struct swap_info_struct *si,
 	}
 
 	WRITE_ONCE(si->swap_map[offset], count);
-	if (!count && !__swap_has_cache(ci, offset))
+	if (!count && !entry_is_folio(__swap_map_get(ci, offset)))
 		swap_entries_free(si, ci, entry, 1);
 
 	return count;
@@ -1449,7 +1454,7 @@ fallback:
 locked_fallback:
 	for (i = 0; i < nr; i++, entry.val++) {
 		swap_entry_put_locked(si, ci, entry);
-		if (__swap_has_cache(ci, swp_offset(entry)))
+		if (entry_is_folio(__swap_map_get(ci, swp_offset(entry))))
 			has_cache = true;
 	}
 	swap_unlock_cluster(ci);
@@ -1742,7 +1747,7 @@ void free_swap_and_cache_nr(swp_entry_t entry, int nr)
 	 */
 	for (offset = start_offset; offset < end_offset; offset += nr) {
 		nr = 1;
-		if (!__swap_has_cache(swp_offset_cluster(si, offset), offset))
+		if (!entry_is_folio(__swap_map_get(swp_offset_cluster(si, offset), offset)))
 			continue;
 		/*
 		 * Folios are always naturally aligned in swap so
@@ -3471,7 +3476,7 @@ static int __swap_duplicate(swp_entry_t entry, unsigned char usage, int nr)
 		 */
 		if (unlikely(count == SWAP_MAP_BAD)) {
 			err = -ENOENT;
-		} else if (!count && !__swap_has_cache(ci, offset)) {
+		} else if (!count && !entry_is_folio(__swap_map_get(ci, offset))) {
 			err = -ENOENT;
 			WARN_ON_ONCE(1);
 		} else if ((count & ~COUNT_CONTINUED) > SWAP_MAP_MAX) {
