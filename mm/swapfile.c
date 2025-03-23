@@ -896,7 +896,7 @@ new_cluster:
 	if (vm_swap_full())
 		swap_reclaim_full_clusters(si, false);
 
-	if (order < PMD_ORDER) {
+	if (order < SWAP_NR_PARTIAL_ORDERS) {
 		unsigned int frags = 0;
 
 		while ((ci = isolate_lock_cluster(si, &si->nonfull_clusters[order]))) {
@@ -935,7 +935,7 @@ new_cluster:
 		goto done;
 
 	/* Order 0 stealing from higher order */
-	for (int o = 1; o < SWAP_NR_ORDERS; o++) {
+	for (int o = 1; o < SWAP_NR_PARTIAL_ORDERS; o++) {
 		/*
 		 * Clusters here have at least one usable slots and can't fail order 0
 		 * allocation, but reclaim may drop si->lock and race with another user.
@@ -3158,7 +3158,7 @@ static struct swap_cluster_info *setup_clusters(struct swap_info_struct *si,
 	INIT_LIST_HEAD(&si->full_clusters);
 	INIT_LIST_HEAD(&si->discard_clusters);
 
-	for (i = 0; i < SWAP_NR_ORDERS; i++) {
+	for (i = 0; i < SWAP_NR_PARTIAL_ORDERS; i++) {
 		INIT_LIST_HEAD(&si->nonfull_clusters[i]);
 		INIT_LIST_HEAD(&si->frag_clusters[i]);
 	}
