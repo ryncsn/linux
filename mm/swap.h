@@ -202,10 +202,9 @@ static inline pgoff_t folio_index(struct folio *folio)
 }
 
 /* Check if a swap entry is contained by a folio. */
-static inline bool folio_swap_contains(struct folio *folio, swp_entry_t swp,
-				       bool direct)
+static inline bool folio_swap_contains(struct folio *folio, swp_entry_t swp)
 {
-	if (unlikely(!direct && !folio_test_swapcache(folio)))
+	if (unlikely(!folio_test_swapcache(folio)))
 		return false;
 	if (swp_type(swp) != swp_type(folio->swap))
 		return false;
@@ -312,10 +311,6 @@ static inline void swap_update_readahead(struct folio *folio,
 static inline int swap_writepage(struct page *p, struct writeback_control *wbc)
 {
 	return 0;
-}
-
-static inline void swapcache_clear(struct swap_info_struct *si, swp_entry_t entry, int nr)
-{
 }
 
 static inline int swap_cache_swapon(int type, unsigned long max_pages)
