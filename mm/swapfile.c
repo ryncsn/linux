@@ -1580,14 +1580,6 @@ void put_swap_folio(struct folio *folio, swp_entry_t entry)
 	swap_entries_put_cache(si, entry, size);
 }
 
-int __swap_count(swp_entry_t entry)
-{
-	struct swap_info_struct *si = swp_info(entry);
-	pgoff_t offset = swp_offset(entry);
-
-	return swap_count(si->swap_map[offset]);
-}
-
 /*
  * How many references to @entry are currently swapped out?
  * This does not give an exact answer when swap count is continued,

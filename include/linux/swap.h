@@ -446,7 +446,6 @@ int swap_type_of(dev_t device, sector_t offset);
 int find_first_swap(dev_t *device);
 extern unsigned int count_swap_pages(int, int);
 extern sector_t swapdev_block(int, pgoff_t);
-extern int __swap_count(swp_entry_t entry);
 extern bool swap_entry_swapped(struct swap_info_struct *si, swp_entry_t entry);
 extern int swp_swapcount(swp_entry_t entry);
 struct backing_dev_info;
@@ -511,11 +510,6 @@ static inline void swap_free_nr(swp_entry_t entry, int nr_pages)
 
 static inline void put_swap_folio(struct folio *folio, swp_entry_t swp)
 {
-}
-
-static inline int __swap_count(swp_entry_t entry)
-{
-	return 0;
 }
 
 static inline bool swap_entry_swapped(struct swap_info_struct *si, swp_entry_t entry)
