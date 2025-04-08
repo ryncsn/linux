@@ -3463,6 +3463,7 @@ static int __split_unmapped_folio(struct folio *folio, int new_order,
 	struct address_space *swap_cache = NULL;
 	struct folio *origin_folio = folio;
 	struct folio *next_folio = folio_next(folio);
+	struct swap_cluster_info *ci;
 	struct folio *new_folio;
 	struct folio *next;
 	int order = folio_order(folio);
@@ -3474,13 +3475,14 @@ static int __split_unmapped_folio(struct folio *folio, int new_order,
 
 	if (folio_test_swapcache(folio)) {
 		VM_BUG_ON(mapping);
+		VM_BUG_ON_BAD_SWAP_CLUSTER(folio->swap, 1 << order);
 
 		/* a swapcache folio can only be uniformly split to order-0 */
 		if (!uniform_split || new_order != 0)
 			return -EINVAL;
 
-		swap_cache = swap_address_space(folio->swap);
-		xa_lock(&swap_cache->i_pages);
+		ci = swap_lock_cluster(swp_info(folio->swap),
+				       swp_offset(folio->swap));
 	}
 
 	if (folio_test_anon(folio))
@@ -3588,9 +3590,8 @@ after_split:
 				__xa_store(&mapping->i_pages,
 						release->index, release, 0);
 			} else if (swap_cache) {
-				__xa_store(&swap_cache->i_pages,
-						swap_cache_index(release->swap),
-						release, 0);
+				__swap_cache_override_folio(ci, release->swap,
+							    origin_folio, release);
 			}
 		}
 	}
@@ -3607,7 +3608,7 @@ after_split:
 	unlock_page_lruvec(lruvec);
 
 	if (swap_cache)
-		xa_unlock(&swap_cache->i_pages);
+		swap_unlock_cluster(ci);
 	if (mapping)
 		xa_unlock(&mapping->i_pages);
 
