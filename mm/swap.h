@@ -132,6 +132,8 @@ static inline void swap_unlock_cluster_irq(struct swap_cluster_info *ci)
 	spin_unlock_irq(&ci->lock);
 }
 
+extern int __swap_count(swp_entry_t entry);
+
 /* linux/mm/page_io.c */
 int sio_pool_init(void);
 struct swap_iocb;

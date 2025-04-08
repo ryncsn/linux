@@ -131,7 +131,14 @@ int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
 		exist = __swap_table_get(ci, offset);
 		if (entry_is_folio(exist)) {
 			swap_unlock_cluster(ci);
-			return -EEXIST;
+			/*
+			 * In case a of large folio being blocked
+			 * by a smaller folio, return a different error.
+			 */
+			if (offset == swp_offset(entry))
+				return -EEXIST;
+			else
+				return -EAGAIN;
 		}
 		if (shadow && entry_is_shadow(exist))
 			*shadow = entry_to_shadow(exist);
@@ -212,7 +219,8 @@ void __swap_cache_clear_shadow(swp_entry_t entry, int nr_ents)
 	ci = swp_offset_cluster(swp_info(entry), offset);
 	end = offset + nr_ents;
 	do {
-		VM_BUG_ON(entry_to_folio(__swap_table_get(ci, offset)));
+		if (entry_to_folio(__swap_table_get(ci, offset)))
+			continue;
 		__swap_table_set(ci, offset, null_to_entry());
 	} while (++offset < end);
 }
@@ -333,54 +341,43 @@ static struct folio *__swapin_cache_add_prepare(swp_entry_t entry,
 						struct folio *folio,
 						bool skip_if_exists)
 {
-	int nr_pages = folio_nr_pages(folio);
-	struct folio *exist;
-	void *shadow = NULL;
 	int err;
-
-	for (;;) {
-		/*
-		 * Caller should have checked swap cache and swap count, try
-		 * prepare the swap cache map directly.
-		 */
-		err = swapcache_prepare(entry, nr_pages);
-		if (!err)
-			break;
-		else if (err != -EEXIST)
-			return NULL;
-
-		/*
-		 * Protect against a recursive call to __swapin_cache_alloc()
-		 * on the same entry waiting forever here because SWAP_HAS_CACHE
-		 * is set but the folio is not the swap cache yet. This can
-		 * happen today if mem_cgroup_swapin_charge_folio() below
-		 * triggers reclaim through zswap, which may call
-		 * __swapin_cache_alloc() in the writeback path.
-		 */
-		if (skip_if_exists)
-			return NULL;
-
-		exist = swap_cache_get_folio(entry);
-		if (exist)
-			return exist;
-
-		/*
-		 * We might race against __swap_cache_del_folio(), and
-		 * stumble across a swap_map entry whose SWAP_HAS_CACHE
-		 * has not yet been cleared.  Or race against another
-		 * __swapin_cache_alloc(), which has set SWAP_HAS_CACHE
-		 * in swap_map, but not yet added its folio to swap cache.
-		 */
-		schedule_timeout_uninterruptible(1);
-	}
+	void *shadow = NULL;
+	struct folio *exist = NULL;
+	struct swap_cluster_info *ci;
 
 	/*
 	 * The swap entry is ours to swap in. Prepare the new folio.
 	 */
 	__folio_set_locked(folio);
 	__folio_set_swapbacked(folio);
+retry_cache:
+	err = swap_cache_add_folio(entry, folio, &shadow);
+	if (err) {
+		/* Raced with another swap in or readahead. */
+		if (err == -EEXIST) {
+			exist = swap_cache_get_folio(entry);
+			if (exist) {
+				/* Wait a bit to prevent repeated page fault */
+				folio_wait_locked(exist);
+				if (folio_test_swapcache(exist)) {
+					__folio_clear_locked(folio);
+					return exist;
+				}
+				folio_put(exist);
+			}
+			goto retry_cache;
+		}
+		__folio_clear_locked(folio);
+		return NULL;
+	}
 
-	if (swap_cache_add_folio(entry, folio, &shadow))
+	/*
+	 * Ensure the swap entry isn't gone while HAS_CACHE is not set,
+	 * also set HAS_CACHE to prevent the entries from being freed.
+	 * TODO: This is no longer needed once HAS_CACHE is gone.
+	 */
+	if (swapcache_prepare(entry, folio_nr_pages(folio)))
 		goto fail_unlock;
 
 	memcg1_swapin(entry, 1);
@@ -393,7 +390,14 @@ static struct folio *__swapin_cache_add_prepare(swp_entry_t entry,
 	return folio;
 
 fail_unlock:
-	put_swap_folio(folio, entry);
+	/*
+	 * Failed to set HAS_CACHE after adding to swap cache,
+	 * clean it up manually.
+	 */
+	ci = swap_lock_cluster(swp_info(entry), swp_offset(entry));
+	__swap_cache_del_folio(entry, folio, NULL);
+	swap_unlock_cluster(ci);
+	folio_ref_sub(folio, folio_nr_pages(folio));
 	folio_unlock(folio);
 	return NULL;
 }
