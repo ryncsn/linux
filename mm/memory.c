@@ -3782,7 +3782,7 @@ static bool __wp_can_reuse_large_anon_folio(struct folio *folio,
 		 */
 		if (!folio_trylock(folio))
 			return false;
-		folio_free_swap(folio);
+		folio_reclaim_swap(folio);
 		folio_unlock(folio);
 	}
 
@@ -3845,7 +3845,7 @@ static bool wp_can_reuse_anon_folio(struct folio *folio,
 	if (!folio_trylock(folio))
 		return false;
 	if (folio_test_swapcache(folio))
-		folio_free_swap(folio);
+		folio_reclaim_swap(folio);
 	if (folio_test_ksm(folio) || folio_ref_count(folio) != 1) {
 		folio_unlock(folio);
 		return false;
@@ -4567,7 +4567,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 
 	if (swapcache) {
 		/*
-		 * Make sure folio_free_swap() or swapoff did not release the
+		 * Make sure folio_reclaim_swap() or swapoff did not release the
 		 * swapcache from under us.  The page pin, and pte_same test
 		 * below, are not enough to exclude that.  Even if it is still
 		 * swapcache, we need to check that the page's swap has not
@@ -4714,7 +4714,7 @@ check_folio:
 	 */
 	swap_free_nr(entry, nr_pages);
 	if (should_try_to_free_swap(folio, vma, vmf->flags))
-		folio_free_swap(folio);
+		folio_reclaim_swap(folio);
 
 	add_mm_counter(vma->vm_mm, MM_ANONPAGES, nr_pages);
 	add_mm_counter(vma->vm_mm, MM_SWAPENTS, -nr_pages);
