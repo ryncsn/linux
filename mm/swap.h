@@ -132,7 +132,13 @@ static inline void swap_unlock_cluster_irq(struct swap_cluster_info *ci)
 	spin_unlock_irq(&ci->lock);
 }
 
-extern int __swap_count(swp_entry_t entry);
+extern int __swap_count(struct swap_info_struct *si, pgoff_t offset);
+
+extern bool __swap_has_cache(struct swap_cluster_info *ci, pgoff_t offset);
+
+extern void swap_entries_free(struct swap_info_struct *si,
+			      struct swap_cluster_info *ci,
+			      swp_entry_t entry, unsigned int nr_pages);
 
 /* linux/mm/page_io.c */
 int sio_pool_init(void);
