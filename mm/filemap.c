@@ -129,7 +129,7 @@ static void page_cache_delete(struct address_space *mapping,
 				   struct folio *folio, void *shadow)
 {
 	XA_STATE(xas, &mapping->i_pages, folio->index);
-	long nr = 1;
+	unsigned long nr = 1;
 
 	mapping_set_update(&xas, mapping);
 
@@ -149,7 +149,7 @@ static void page_cache_delete(struct address_space *mapping,
 static void filemap_unaccount_folio(struct address_space *mapping,
 		struct folio *folio)
 {
-	long nr;
+	unsigned long nr;
 
 	VM_BUG_ON_FOLIO(folio_mapped(folio), folio);
 	if (!IS_ENABLED(CONFIG_DEBUG_VM) && unlikely(folio_mapped(folio))) {
@@ -276,7 +276,7 @@ static void page_cache_delete_batch(struct address_space *mapping,
 			     struct folio_batch *fbatch)
 {
 	XA_STATE(xas, &mapping->i_pages, fbatch->folios[0]->index);
-	long total_pages = 0;
+	unsigned long total_pages = 0;
 	int i = 0;
 	struct folio *folio;
 
@@ -859,7 +859,7 @@ noinline int __filemap_add_folio(struct address_space *mapping,
 {
 	XA_STATE_ORDER(xas, &mapping->i_pages, index, folio_order(folio));
 	bool huge;
-	long nr;
+	unsigned long nr;
 	unsigned int forder = folio_order(folio);
 
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
