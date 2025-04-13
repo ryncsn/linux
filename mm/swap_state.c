@@ -484,12 +484,17 @@ out:
  * Reads @entry into @folio. @folio will be added to swap cache first, if
  * this raced with another users, only one user will successfully add its
  * folio into swap cache, and that folio will be returned for all readers.
+ *
+ * If @folio is a large folio, the entry will be rounded down to match
+ * the folio start and the whole folio will be read in.
  */
 struct folio *swapin_entry(swp_entry_t entry, struct folio *folio)
 {
 	struct folio *swapcache;
+	pgoff_t offset = swp_offset(entry);
+	unsigned long nr_pages = folio_nr_pages(folio);
 
-	VM_WARN_ON(!IS_ALIGNED(entry.val, folio_nr_pages(folio)));
+	entry = swp_entry(swp_type(entry), ALIGN_DOWN(offset, nr_pages));
 	swapcache = __swapin_cache_add_prepare(entry, folio, false);
 	if (swapcache == folio)
 		swap_read_folio(folio, NULL);

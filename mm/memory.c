@@ -4427,6 +4427,50 @@ static struct folio *alloc_swap_folio(struct vm_fault *vmf)
 
 static DECLARE_WAIT_QUEUE_HEAD(swapcache_wq);
 
+/* Check if a folio should be exclusive, with sanity tests */
+static bool check_swap_exclusive(struct folio *folio, swp_entry_t entry,
+				 pte_t *start_ptep, unsigned int fault_nr)
+{
+	int i;
+	pte_t pte;
+	pgoff_t offset = swp_offset(entry);
+	pte_t *ptep = start_ptep, *end_ptep = start_ptep + fault_nr;
+
+	/* Swapin should brought back either single page or entire folio */
+	VM_WARN_ON(fault_nr != 1 && fault_nr != folio_nr_pages(folio));
+	if (!pte_swp_exclusive(ptep_get(start_ptep)))
+		return false;
+
+	while (++ptep < end_ptep) {
+		pte = ptep_get(ptep);
+		if (!pte_swp_exclusive(pte)) {
+			VM_WARN_ON_FOLIO(1, folio);
+			return false;
+		}
+	}
+
+	/* For exclusive swapin, it must not be mapped */
+	if (fault_nr == 1) {
+		struct page *page = folio_file_page(folio, offset);
+		VM_WARN_ON_ONCE_PAGE(page_mapped(page), page);
+	} else {
+		VM_WARN_ON_ONCE_FOLIO(folio_mapped(folio), folio);
+	}
+
+	/*
+	 * Check if swap count is consistent, no need to hold the
+	 * cluster lock, the folio lock keeps the swap count stable.
+	 */
+	if (IS_ENABLED(CONFIG_VM_DEBUG)) {
+		for (i = 0; i < fault_nr; i++) {
+			VM_WARN_ON_FOLIO(__swap_count(entry) != 1, folio);
+			entry.val++;
+		}
+	}
+
+	return true;
+}
+
 /*
  * We enter with non-exclusive mmap_lock (to exclude vma changes,
  * but allow concurrent faults), and pte mapped but not yet locked.
@@ -4723,7 +4767,7 @@ check_folio:
 	 * the swap entry concurrently) for certainly exclusive pages.
 	 */
 	if (!folio_test_ksm(folio)) {
-		exclusive = pte_swp_exclusive(vmf->orig_pte);
+		exclusive = check_swap_exclusive(folio, entry, ptep, nr_pages);
 		if (folio != swapcache) {
 			/*
 			 * We have a fresh page that is not exposed to the
