@@ -4427,6 +4427,32 @@ static struct folio *alloc_swap_folio(struct vm_fault *vmf)
 
 static DECLARE_WAIT_QUEUE_HEAD(swapcache_wq);
 
+/* Check if a folio should be exclusive, with sanity tests */
+static bool check_swap_exclusive(struct folio *folio, pte_t *fault_ptep,
+				 unsigned int fault_nr)
+{
+	pte_t pte;
+	pte_t *ptep = fault_ptep, *end_ptep;
+
+	/* Swapin should only happen on single page or entire folio */
+	VM_WARN_ON(fault_nr != 1 && fault_nr != folio_nr_pages(folio));
+
+	if (fault_nr == 1)
+		return pte_swp_exclusive(ptep_get(ptep));
+
+	end_ptep = fault_ptep + fault_nr;
+	do {
+		pte = ptep_get(ptep);
+		if (!pte_swp_exclusive(pte))
+			return false;
+	} while (++ptep < end_ptep);
+
+	/* For exclusive swapin, the folio must not be mapped */
+	VM_WARN_ON_FOLIO(folio_mapped(folio), folio);
+
+	return true;
+}
+
 /*
  * We enter with non-exclusive mmap_lock (to exclude vma changes,
  * but allow concurrent faults), and pte mapped but not yet locked.
@@ -4726,7 +4752,7 @@ check_folio:
 	 * the swap entry concurrently) for certainly exclusive pages.
 	 */
 	if (!folio_test_ksm(folio)) {
-		exclusive = pte_swp_exclusive(vmf->orig_pte);
+		exclusive = check_swap_exclusive(folio, ptep, nr_pages);
 		if (folio != swapcache) {
 			/*
 			 * We have a fresh page that is not exposed to the
