@@ -1587,7 +1587,16 @@ int proc_do_static_key(const struct ctl_table *table, int write,
 	return ret;
 }
 
+int kasong_debug;
+
 static const struct ctl_table kern_table[] = {
+	{
+		.procname	= "kasong_debug",
+		.data		= &kasong_debug,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
 	{
 		.procname	= "panic",
 		.data		= &panic_timeout,
