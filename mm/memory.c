@@ -4425,30 +4425,42 @@ static struct folio *alloc_swap_folio(struct vm_fault *vmf)
 }
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 
-static DECLARE_WAIT_QUEUE_HEAD(swapcache_wq);
-
 /* Check if a folio should be exclusive, with sanity tests */
-static bool check_swap_exclusive(struct folio *folio, pte_t *fault_ptep,
-				 unsigned int fault_nr)
+static bool check_swap_exclusive(struct folio *folio, swp_entry_t entry,
+				 pte_t *fault_ptep, unsigned int fault_nr)
 {
+	int i;
 	pte_t pte;
 	pte_t *ptep = fault_ptep, *end_ptep;
 
 	/* Swapin should only happen on single page or entire folio */
 	VM_WARN_ON(fault_nr != 1 && fault_nr != folio_nr_pages(folio));
 
-	if (fault_nr == 1)
-		return pte_swp_exclusive(ptep_get(ptep));
-
-	end_ptep = fault_ptep + fault_nr;
-	do {
-		pte = ptep_get(ptep);
-		if (!pte_swp_exclusive(pte))
+	if (fault_nr == 1) {
+		if (!pte_swp_exclusive(ptep_get(ptep)))
 			return false;
-	} while (++ptep < end_ptep);
+	} else {
+		end_ptep = fault_ptep + fault_nr;
+		do {
+			pte = ptep_get(ptep);
+			if (!pte_swp_exclusive(pte))
+				return false;
+		} while (++ptep < end_ptep);
 
-	/* For exclusive swapin, the folio must not be mapped */
-	VM_WARN_ON_FOLIO(folio_mapped(folio), folio);
+		/* For exclusive swapin, the folio must not be mapped */
+		VM_WARN_ON_FOLIO(folio_mapped(folio), folio);
+	}
+
+	/*
+	 * Swapin of anon folio always goes through swap cache,
+	 * so folio lock ensures the swap ccount is stable.
+	 */
+	if (IS_ENABLED(CONFIG_VM_DEBUG)) {
+		for (i = 0; i < fault_nr; i++) {
+			VM_WARN_ON_FOLIO(__swap_count(entry) != 1, folio);
+			entry.val++;
+		}
+	}
 
 	return true;
 }
@@ -4465,16 +4477,13 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	struct folio *swapcache, *folio = NULL;
-	DECLARE_WAITQUEUE(wait, current);
 	struct page *page;
 	struct swap_info_struct *si = NULL;
 	rmap_t rmap_flags = RMAP_NONE;
-	bool need_clear_cache = false;
 	bool exclusive = false;
 	swp_entry_t entry;
 	pte_t pte;
 	vm_fault_t ret = 0;
-	void *shadow = NULL;
 	int nr_pages;
 	unsigned long page_idx;
 	unsigned long address;
@@ -4550,54 +4559,17 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	swapcache = folio;
 
 	if (!folio) {
-		if (data_race(si->flags & SWP_SYNCHRONOUS_IO) &&
-		    __swap_count(entry) == 1) {
-			/* skip swapcache */
+		if (data_race(si->flags & SWP_SYNCHRONOUS_IO)) {
 			folio = alloc_swap_folio(vmf);
 			if (folio) {
-				__folio_set_locked(folio);
-				__folio_set_swapbacked(folio);
-
-				nr_pages = folio_nr_pages(folio);
-				if (folio_test_large(folio))
-					entry.val = ALIGN_DOWN(entry.val, nr_pages);
-				/*
-				 * Prevent parallel swapin from proceeding with
-				 * the cache flag. Otherwise, another thread
-				 * may finish swapin first, free the entry, and
-				 * swapout reusing the same entry. It's
-				 * undetectable as pte_same() returns true due
-				 * to entry reuse.
-				 */
-				if (swapcache_prepare(entry, nr_pages)) {
-					/*
-					 * Relax a bit to prevent rapid
-					 * repeated page faults.
-					 */
-					add_wait_queue(&swapcache_wq, &wait);
-					schedule_timeout_uninterruptible(1);
-					remove_wait_queue(&swapcache_wq, &wait);
-					goto out_page;
+				swapcache = swapin_entry(entry, folio);
+				if (swapcache != folio) {
+					folio_put(folio);
+					folio = swapcache;
 				}
-				need_clear_cache = true;
-
-				memcg1_swapin(entry, nr_pages);
-
-				shadow = swap_cache_get_shadow(entry);
-				if (shadow)
-					workingset_refault(folio, shadow);
-
-				folio_add_lru(folio);
-
-				/* To provide entry to swap_read_folio() */
-				folio->swap = entry;
-				swap_read_folio(folio, NULL);
-				folio->private = NULL;
 			}
 		} else {
-			folio = swapin_readahead(entry, GFP_HIGHUSER_MOVABLE,
-						vmf);
-			swapcache = folio;
+			folio = swapin_readahead(entry, GFP_HIGHUSER_MOVABLE, vmf);
 		}
 
 		if (!folio) {
@@ -4617,7 +4589,9 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 		ret = VM_FAULT_MAJOR;
 		count_vm_event(PGMAJFAULT);
 		count_memcg_event_mm(vma->vm_mm, PGMAJFAULT);
+
 		page = folio_file_page(folio, swp_offset(entry));
+		swapcache = folio;
 	} else if (PageHWPoison(page)) {
 		/*
 		 * hwpoisoned dirty swapcache pages are kept for killing
@@ -4686,30 +4660,12 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 		goto out_nomap;
 	}
 
-	/* allocated large folios for SWP_SYNCHRONOUS_IO */
-	if (folio_test_large(folio) && !folio_test_swapcache(folio)) {
-		unsigned long nr = folio_nr_pages(folio);
-		unsigned long folio_start = ALIGN_DOWN(vmf->address, nr * PAGE_SIZE);
-		unsigned long idx = (vmf->address - folio_start) / PAGE_SIZE;
-		pte_t *folio_ptep = vmf->pte - idx;
-		pte_t folio_pte = ptep_get(folio_ptep);
-
-		if (!pte_same(folio_pte, pte_move_swp_offset(vmf->orig_pte, -idx)) ||
-		    swap_pte_batch(folio_ptep, nr, folio_pte) != nr)
-			goto out_nomap;
-
-		page_idx = idx;
-		address = folio_start;
-		ptep = folio_ptep;
-		goto check_folio;
-	}
-
 	nr_pages = 1;
 	page_idx = 0;
 	address = vmf->address;
 	ptep = vmf->pte;
 	if (folio_test_large(folio) && folio_test_swapcache(folio)) {
-		int nr = folio_nr_pages(folio);
+		unsigned long nr = folio_nr_pages(folio);
 		unsigned long idx = folio_page_idx(folio, page);
 		unsigned long folio_start = address - idx * PAGE_SIZE;
 		unsigned long folio_end = folio_start + nr * PAGE_SIZE;
@@ -4736,6 +4692,13 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	}
 
 check_folio:
+	/* XXX: Remove this WARN_ON? */
+	VM_WARN_ON(folio_nr_pages(folio) != nr_pages && !folio_test_anon(folio));
+	if (folio_nr_pages(folio) != nr_pages && !folio_test_anon(folio)) {
+		delete_from_swap_cache(folio);
+		goto out_page;
+	}
+
 	/*
 	 * PG_anon_exclusive reuses PG_mappedtodisk for anon pages. A swap pte
 	 * must never point at an anonymous page in the swapcache that is
@@ -4752,14 +4715,8 @@ check_folio:
 	 * the swap entry concurrently) for certainly exclusive pages.
 	 */
 	if (!folio_test_ksm(folio)) {
-		exclusive = check_swap_exclusive(folio, ptep, nr_pages);
-		if (folio != swapcache) {
-			/*
-			 * We have a fresh page that is not exposed to the
-			 * swapcache -> certainly exclusive.
-			 */
-			exclusive = true;
-		} else if (exclusive && folio_test_writeback(folio) &&
+		exclusive = check_swap_exclusive(folio, entry, ptep, nr_pages);
+		if (exclusive && folio_test_writeback(folio) &&
 			  data_race(si->flags & SWP_STABLE_WRITES)) {
 			/*
 			 * This is tricky: not all swap backends support
@@ -4789,15 +4746,6 @@ check_folio:
 	 * so this must be called before swap_free().
 	 */
 	arch_swap_restore(folio_swap(entry, folio), folio);
-
-	/*
-	 * Remove the swap entry and conditionally try to free up the swapcache.
-	 * We're already holding a reference on the page but haven't mapped it
-	 * yet.
-	 */
-	swap_free_nr(entry, nr_pages);
-	if (should_try_to_free_swap(folio, vma, vmf->flags))
-		folio_free_swap(folio);
 
 	add_mm_counter(vma->vm_mm, MM_ANONPAGES, nr_pages);
 	add_mm_counter(vma->vm_mm, MM_SWAPENTS, -nr_pages);
@@ -4837,10 +4785,10 @@ check_folio:
 		/*
 		 * We currently only expect small !anon folios which are either
 		 * fully exclusive or fully shared, or new allocated large
-		 * folios which are fully exclusive. If we ever get large
-		 * folios within swapcache here, we have to be careful.
+		 * folios which are not added to rmap.
 		 */
-		VM_WARN_ON_ONCE(folio_test_large(folio) && folio_test_swapcache(folio));
+		VM_WARN_ON_FOLIO(folio_nr_pages(folio) != nr_pages, folio);
+		VM_WARN_ON_FOLIO(folio_mapped(folio), folio);
 		VM_WARN_ON_FOLIO(!folio_test_locked(folio), folio);
 		folio_add_new_anon_rmap(folio, vma, address, rmap_flags);
 	} else {
@@ -4853,6 +4801,15 @@ check_folio:
 	set_ptes(vma->vm_mm, address, ptep, pte, nr_pages);
 	arch_do_swap_page_nr(vma->vm_mm, vma, address,
 			pte, pte, nr_pages);
+
+	/*
+	 * Remove the swap entry and conditionally try to free up the swapcache.
+	 * We're already holding a reference on the page but haven't mapped it
+	 * yet.
+	 */
+	swap_free_nr(entry, nr_pages);
+	if (should_try_to_free_swap(folio, vma, vmf->flags))
+		folio_free_swap(folio);
 
 	folio_unlock(folio);
 	if (folio != swapcache && swapcache) {
@@ -4881,12 +4838,6 @@ unlock:
 	if (vmf->pte)
 		pte_unmap_unlock(vmf->pte, vmf->ptl);
 out:
-	/* Clear the swap cache pin for direct swapin after PTL unlock */
-	if (need_clear_cache) {
-		swapcache_clear(si, entry, nr_pages);
-		if (waitqueue_active(&swapcache_wq))
-			wake_up(&swapcache_wq);
-	}
 	if (si)
 		put_swap_device(si);
 	return ret;
@@ -4900,11 +4851,6 @@ out_release:
 	if (folio != swapcache && swapcache) {
 		folio_unlock(swapcache);
 		folio_put(swapcache);
-	}
-	if (need_clear_cache) {
-		swapcache_clear(si, entry, nr_pages);
-		if (waitqueue_active(&swapcache_wq))
-			wake_up(&swapcache_wq);
 	}
 	if (si)
 		put_swap_device(si);
