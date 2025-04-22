@@ -2865,7 +2865,7 @@ static inline
 unsigned int seek_page_size(struct xa_state *xas, struct page *page)
 {
 	if (xa_is_value(page))
-		return PAGE_SIZE << xa_get_order(xas->xa, xas->xa_index);
+		return PAGE_SIZE << xas_get_order(xas);
 	return thp_size(page);
 }
 
