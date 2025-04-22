@@ -4426,7 +4426,7 @@ static struct folio *alloc_swap_folio(struct vm_fault *vmf)
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 
 /* Check if a folio should be exclusive, with sanity tests */
-static bool check_swap_exclusive(struct folio *folio, swp_entry_t entry,
+static bool check_swap_exclusive(struct folio *folio, swp_entry_t ent,
 				 pte_t *fault_ptep, unsigned int fault_nr)
 {
 	int i;
@@ -4457,8 +4457,8 @@ static bool check_swap_exclusive(struct folio *folio, swp_entry_t entry,
 	 */
 	if (IS_ENABLED(CONFIG_VM_DEBUG)) {
 		for (i = 0; i < fault_nr; i++) {
-			VM_WARN_ON_FOLIO(__swap_count(entry) != 1, folio);
-			entry.val++;
+			VM_WARN_ON_FOLIO(__swap_count(swp_info(ent), swp_offset(ent)) != 1, folio);
+			ent.val++;
 		}
 	}
 

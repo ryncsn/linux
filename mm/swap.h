@@ -132,6 +132,15 @@ static inline void swap_unlock_cluster_irq(struct swap_cluster_info *ci)
 	spin_unlock_irq(&ci->lock);
 }
 
+extern int __swap_count(struct swap_info_struct *si,
+			unsigned long offset);
+extern int __swap_cache_set_map(struct swap_info_struct *si,
+				struct swap_cluster_info *ci,
+				unsigned long offset);
+extern int __swap_cache_put_map(struct swap_info_struct *si,
+				struct swap_cluster_info *ci,
+				unsigned long offset);
+
 /* linux/mm/page_io.c */
 int sio_pool_init(void);
 struct swap_iocb;
@@ -154,8 +163,8 @@ static inline struct address_space *swap_address_space(swp_entry_t entry)
 }
 
 extern struct folio *swap_cache_get_folio(swp_entry_t entry);
-extern int swap_cache_add_folio(swp_entry_t entry,
-				struct folio *folio, void **shadow);
+extern struct folio *swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
+					  void **shadow, bool swapin);
 extern void __swap_cache_del_folio(swp_entry_t entry,
 				   struct folio *folio, void *shadow);
 extern int __swap_cache_replace_folio(struct swap_cluster_info *ci,
@@ -188,14 +197,24 @@ static inline pgoff_t swap_cache_index(swp_entry_t entry)
  * swap cache lookup as the folio might have been invalidated while
  * it's unlocked.
  */
-static inline bool folio_swap_contains(struct folio *folio, swp_entry_t entry)
+static inline bool __folio_swap_contains(struct folio *folio, swp_entry_t entry)
 {
-	VM_BUG_ON(!folio_test_locked(folio));
 	if (unlikely(!folio_test_swapcache(folio)))
 		return false;
 	if (unlikely(swp_type(entry) != swp_type(folio->swap)))
 		return false;
 	return (swp_offset(entry) - swp_offset(folio->swap)) < folio_nr_pages(folio);
+}
+
+
+/*
+ * Check if a folio still contains a swap entry, must be called after swap cache
+ * lookup as the folio might have been invalidated while not holding the lock.
+ */
+static inline bool folio_swap_contains(struct folio *folio, swp_entry_t entry)
+{
+	VM_BUG_ON(!folio_test_locked(folio));
+	return __folio_swap_contains(folio, entry);
 }
 
 void show_swap_cache_info(void);
@@ -305,6 +324,12 @@ static inline int swap_writepage(struct page *p, struct writeback_control *wbc)
 	return 0;
 }
 
+extern inline int __swap_count(struct swap_info_struct *si,
+			       unsigned long offset)
+{
+	return 0;
+}
+
 static inline int swap_cache_swapon(int type, unsigned long max_pages)
 {
 	return 0;
@@ -319,10 +344,9 @@ static inline struct folio *swap_cache_get_folio(swp_entry_t entry)
 	return NULL;
 }
 
-static inline int swap_cache_add_folio(swp_entry_t, struct folio *, void **);
-{
-	return -EINVAL;
-}
+static inline struct folio *swap_cache_add_folio(swp_entry_t entry,
+						 struct folio *folio,
+						 void **shadow, bool swapin);
 
 static inline void __swap_cache_del_folio(struct folio *, swp_entry_t, void *)
 {
