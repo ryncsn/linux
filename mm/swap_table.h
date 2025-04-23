@@ -38,6 +38,9 @@
 /* For shadow offset calculation */
 #define SWAP_COUNT_SHIFT	ENTRY_COUNT_BITS
 
+/* For shadow offset calculation */
+#define SWAP_COUNT_SHIFT	ENTRY_COUNT_BITS
+
 /*
  * Helpers for constructing new swap table entry from other types
  */
