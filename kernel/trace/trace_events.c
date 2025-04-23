@@ -2445,7 +2445,7 @@ event_subsystem_dir(struct trace_array *tr, const char *name,
 
 	dir->entry = tracefs_create_dir(name, parent);
 	if (!dir->entry) {
-		pr_warn("Failed to create system directory %s\n", name);
+		pr_warn_once("Failed to create system directory %s\n", name);
 		__put_system(system);
 		goto out_free;
 	}

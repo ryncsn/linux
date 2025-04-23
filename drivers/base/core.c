@@ -1315,7 +1315,11 @@ void device_links_driver_bound(struct device *dev)
 			 */
 			device_link_drop_managed(link);
 		} else {
-			WARN_ON(link->status != DL_STATE_CONSUMER_PROBE);
+			if (link->status != DL_STATE_CONSUMER_PROBE) {
+				// WARN_ON_ONCE(1);
+				pr_err("WARNING: Unexpected status: %x, consumer %s, supplier %s, force activating.\n",
+				       READ_ONCE(link->status), dev_name(link->consumer), dev_name(link->supplier));
+			}
 			WRITE_ONCE(link->status, DL_STATE_ACTIVE);
 		}
 
