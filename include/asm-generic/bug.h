@@ -55,7 +55,6 @@ struct bug_entry {
  */
 #ifndef HAVE_ARCH_BUG
 #define BUG() do { \
-	printk("BUG: failure at %s:%d/%s()!\n", __FILE__, __LINE__, __func__); \
 	barrier_before_unreachable(); \
 	panic("BUG!"); \
 } while (0)
@@ -88,7 +87,8 @@ void warn_slowpath_fmt(const char *file, const int line, unsigned taint,
 #define __WARN()		__WARN_printf(TAINT_WARN, NULL)
 #define __WARN_printf(taint, arg...) do {				\
 		instrumentation_begin();				\
-		warn_slowpath_fmt(__FILE__, __LINE__, taint, arg);	\
+		no_printk(arg);					\
+		warn_slowpath_fmt(__FILE__, __LINE__, taint);	\
 		instrumentation_end();					\
 	} while (0)
 #else
@@ -96,7 +96,7 @@ extern __printf(1, 2) void __warn_printk(const char *fmt, ...);
 #define __WARN()		__WARN_FLAGS(BUGFLAG_TAINT(TAINT_WARN))
 #define __WARN_printf(taint, arg...) do {				\
 		instrumentation_begin();				\
-		__warn_printk(arg);					\
+		no_printk(arg);					\
 		__WARN_FLAGS(BUGFLAG_NO_CUT_HERE | BUGFLAG_TAINT(taint));\
 		instrumentation_end();					\
 	} while (0)
