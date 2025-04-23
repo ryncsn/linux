@@ -995,15 +995,6 @@ int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 	if (unlikely(ret))
 		__ClearPageLocked(page);
 	else {
-		/*
-		 * The page might have been evicted from cache only
-		 * recently, in which case it should be activated like
-		 * any other repeatedly accessed page.
-		 * The exception is pages getting rewritten; evicting other
-		 * data from the working set, only to cache data that will
-		 * get overwritten with something else, is a waste of memory.
-		 */
-		WARN_ON_ONCE(PageActive(page));
 		if (!(gfp_mask & __GFP_WRITE) && shadow)
 			workingset_refault(page, shadow);
 		lru_cache_add(page);
