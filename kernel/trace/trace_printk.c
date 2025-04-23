@@ -185,7 +185,7 @@ static inline void format_mod_start(void) { }
 static inline void format_mod_stop(void) { }
 #endif /* CONFIG_MODULES */
 
-static bool __read_mostly trace_printk_enabled = true;
+static bool __read_mostly trace_printk_enabled = false;
 
 void trace_printk_control(bool enabled)
 {

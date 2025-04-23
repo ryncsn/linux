@@ -29,11 +29,7 @@
 static struct xdbc_state xdbc;
 static bool early_console_keep;
 
-#ifdef XDBC_TRACE
-#define	xdbc_trace	trace_printk
-#else
 static inline void xdbc_trace(const char *fmt, ...) { }
-#endif /* XDBC_TRACE */
 
 static void __iomem * __init xdbc_map_pci_mmio(u32 bus, u32 dev, u32 func)
 {
