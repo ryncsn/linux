@@ -38,6 +38,9 @@
 /* For shadow offset calculation */
 #define SWAP_COUNT_SHIFT	ENTRY_COUNT_BITS
 
+/* For shadow offset calculation */
+#define SWAP_COUNT_SHIFT	ENTRY_COUNT_BITS
+
 /*
  * Helpers for constructing new swap table entry from other types
  */
@@ -61,6 +64,7 @@ static inline swp_te_t shadow_swp_te(void *shadow)
 {
 	BUILD_BUG_ON((BITS_PER_XA_VALUE + 1) !=
 		     BITS_PER_BYTE * sizeof(swp_te_t));
+	VM_WARN_ON((unsigned long)shadow & ENTRY_COUNT_MASK);
 	VM_WARN_ON(!xa_is_value(shadow));
 	swp_te_t entry = { .counter = ((unsigned long)shadow) };
 	return entry;
