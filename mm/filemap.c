@@ -885,9 +885,10 @@ noinline int __add_to_page_cache_locked(struct page *page,
 					void **shadowp)
 {
 	XA_STATE(xas, &mapping->i_pages, offset);
-	int huge = PageHuge(page);
-	int error;
-	bool charged = false;
+	bool huge = PageHuge(page);
+	void *alloced_shadow = NULL;
+	int alloced_order = 0;
+	int error = 0;
 
 	VM_BUG_ON_PAGE(!PageLocked(page), page);
 	VM_BUG_ON_PAGE(PageSwapBacked(page), page);
@@ -901,21 +902,14 @@ noinline int __add_to_page_cache_locked(struct page *page,
 		error = mem_cgroup_charge(page, NULL, gfp);
 		if (error)
 			goto error;
-		charged = true;
 	}
 
 	gfp &= GFP_RECLAIM_MASK;
 
-	do {
-		unsigned int order = xa_get_order(xas.xa, xas.xa_index);
+	for (;;) {
+		int order = -1, split_order = 0;
 		void *entry, *old = NULL;
 
-		if (order > thp_order(page))
-			xas_split_alloc(&xas, xa_load(xas.xa, xas.xa_index),
-					order, gfp);
-			if (xas_error(&xas))
-				goto error;
-		}
 		xas_lock_irq(&xas);
 		xas_for_each_conflict(&xas, entry) {
 			old = entry;
@@ -923,23 +917,36 @@ noinline int __add_to_page_cache_locked(struct page *page,
 				xas_set_err(&xas, -EEXIST);
 				goto unlock;
 			}
+			/*
+			 * If a larger entry exists,
+			 * it will be the first and only entry iterated.
+			 */
+			if (order == -1)
+				order = xas_get_order(&xas);
+		}
+
+		/* entry may have changed before we re-acquire the lock */
+		if (alloced_order && (old != alloced_shadow || order != alloced_order)) {
+			xas_set_err(&xas, -EEXIST);
+			goto unlock;
 		}
 
 		if (old) {
-			if (shadowp)
-				*shadowp = old;
-			/* entry may have been split before we acquired lock */
-			order = xa_get_order(xas.xa, xas.xa_index);
-			if (order > thp_order(page)) {
+			if (order > 0 && order > thp_order(page)) {
+				if (!alloced_order) {
+					split_order = order;
+					goto unlock;
+				}
 				xas_split(&xas, old, order);
 				xas_reset(&xas);
 			}
+			if (shadowp)
+				*shadowp = old;
 		}
 
 		xas_store(&xas, page);
 		if (xas_error(&xas))
 			goto unlock;
-
 		mapping->nrpages++;
 
 		/* hugetlb pages do not participate in page cache accounting */
@@ -947,11 +954,25 @@ noinline int __add_to_page_cache_locked(struct page *page,
 			__inc_lruvec_page_state(page, NR_FILE_PAGES);
 unlock:
 		xas_unlock_irq(&xas);
-	} while (xas_nomem(&xas, gfp));
+
+		/* split needed, alloc here and retry. */
+		if (split_order) {
+			xas_split_alloc(&xas, old, split_order, gfp);
+			if (xas_error(&xas))
+				goto error;
+			alloced_shadow = old;
+			alloced_order = split_order;
+			xas_reset(&xas);
+			continue;
+		}
+
+		if (!xas_nomem(&xas, gfp))
+			break;
+	}
 
 	if (xas_error(&xas)) {
 		error = xas_error(&xas);
-		if (charged)
+		if (!huge)
 			mem_cgroup_uncharge(page);
 		goto error;
 	}
@@ -982,7 +1003,7 @@ int add_to_page_cache_locked(struct page *page, struct address_space *mapping,
 		pgoff_t offset, gfp_t gfp_mask)
 {
 	return __add_to_page_cache_locked(page, mapping, offset,
-					  gfp_mask, NULL);
+					 gfp_mask, NULL);
 }
 EXPORT_SYMBOL(add_to_page_cache_locked);
 
