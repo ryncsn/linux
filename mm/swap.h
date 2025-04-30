@@ -35,6 +35,7 @@ struct swap_cluster_info {
 	u8 flags;
 	u8 order;
 	swp_te_t *table;
+	unsigned long *extend_table; /* Only used for extended swap count */
 	struct list_head list;
 };
 
@@ -136,9 +137,10 @@ extern int __swap_count(struct swap_info_struct *si,
 			unsigned long offset);
 extern bool __swap_has_cache(struct swap_info_struct *si,
 			     pgoff_t offset);
-extern void swap_entries_free(struct swap_info_struct *si,
+extern int swap_retry_table_alloc(swp_entry_t entry, gfp_t gfp);
+extern void swap_free_entries(struct swap_info_struct *si,
 			      struct swap_cluster_info *ci,
-			      swp_entry_t entry, unsigned int nr_pages);
+			      unsigned long offset, unsigned int nr_pages);
 
 /* linux/mm/page_io.c */
 int sio_pool_init(void);
@@ -327,6 +329,11 @@ extern inline int __swap_count(struct swap_info_struct *si,
 			       unsigned long offset)
 {
 	return 0;
+}
+
+extern int swap_retry_table_alloc(swp_entry_t entry, gfp_t gfp)
+{
+	return -EINVAL;
 }
 
 static inline int swap_cache_swapon(int type, unsigned long max_pages)

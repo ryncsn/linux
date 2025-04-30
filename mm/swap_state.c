@@ -200,7 +200,7 @@ void __swap_cache_del_folio(swp_entry_t entry,
 	struct swap_info_struct *si;
 	struct swap_cluster_info *ci;
 	bool folio_swapped = false, need_free = false;
-	pgoff_t offset = swp_offset(entry), end;
+	pgoff_t offset, start, end;
 	unsigned long nr_pages = folio_nr_pages(folio);
 
 	VM_BUG_ON(shadow && !xa_is_value(shadow));
@@ -208,9 +208,10 @@ void __swap_cache_del_folio(swp_entry_t entry,
 	VM_BUG_ON_FOLIO(!folio_test_swapcache(folio), folio);
 	VM_BUG_ON_FOLIO(folio_test_writeback(folio), folio);
 
+	offset = start = swp_offset(entry);
+	end = start + nr_pages;
 	si = swp_info(entry);
-	ci = swp_offset_cluster(si, offset);
-	end = offset + nr_pages;
+	ci = swp_offset_cluster(si, start);
 
 	do {
 		exist = __swap_table_get(ci, offset);
@@ -228,16 +229,13 @@ void __swap_cache_del_folio(swp_entry_t entry,
 	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr_pages);
 
 	if (!folio_swapped) {
-		swap_entries_free(swp_info(entry), ci, entry, nr_pages);
+		swap_free_entries(si, ci, start, nr_pages);
 	} else if (need_free) {
-		offset = swp_offset(entry);
-		while (nr_pages--) {
-			if (!__swap_count(si, offset)) {
-				swap_entries_free(swp_info(entry), ci,
-						  swp_entry(si->type, offset), 1);
-			}
-			offset++;
-		}
+		offset = start;
+		do {
+			if (!__swap_count(si, offset))
+				swap_free_entries(si, ci, offset, 1);
+		} while (++offset < end);
 	}
 }
 

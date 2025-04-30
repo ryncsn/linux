@@ -264,8 +264,7 @@ struct swap_info_struct {
 	signed short	prio;		/* swap priority of this type */
 	struct plist_node list;		/* entry in swap_active_head */
 	signed char	type;		/* strange name for an index */
-	unsigned int	max;		/* extent of the swap_map */
-	unsigned char *swap_map;	/* vmalloc'ed array of usage counts */
+	unsigned int	max;		/* size of this swap device */
 	unsigned long *zeromap;		/* kvmalloc'ed bitmap to track zero pages */
 	struct swap_cluster_info *cluster_info; /* cluster info. Only for SSD */
 	struct list_head free_clusters; /* free clusters list */
@@ -284,7 +283,7 @@ struct swap_info_struct {
 	struct completion comp;		/* seldom referenced */
 	spinlock_t lock;		/*
 					 * protect map scan related fields like
-					 * swap_map, lowest_bit, highest_bit,
+					 * lowest_bit, highest_bit,
 					 * inuse_pages, cluster_next,
 					 * cluster_nr, lowest_alloc,
 					 * highest_alloc, free/discard cluster
@@ -436,8 +435,8 @@ int folio_alloc_swap(struct folio *folio, gfp_t gfp_mask);
 bool folio_reclaim_swap(struct folio *folio);
 void put_swap_folio(struct folio *folio, swp_entry_t entry);
 extern swp_entry_t get_swap_page_of_type(int);
-extern int add_swap_count_continuation(swp_entry_t, gfp_t);
 extern int swap_duplicate_nr(swp_entry_t, int);
+extern void swap_put_nr(swp_entry_t entry, int nr_pages);
 extern void swap_free_nr(swp_entry_t entry, int nr_pages);
 extern void free_swap_and_cache_nr(swp_entry_t entry, int nr);
 int swap_type_of(dev_t device, sector_t offset);
@@ -483,11 +482,6 @@ static inline void free_swap_and_cache_nr(swp_entry_t entry, int nr)
 
 static inline void free_swap_cache(struct folio *folio)
 {
-}
-
-static inline int add_swap_count_continuation(swp_entry_t swp, gfp_t gfp_mask)
-{
-	return 0;
 }
 
 static inline int swap_duplicate_nr(swp_entry_t swp, int nr_pages)
