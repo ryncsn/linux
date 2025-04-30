@@ -94,13 +94,14 @@ void __swap_cache_override_folio(struct swap_cluster_info *ci, swp_entry_t entry
 int __swap_cache_replace_folio(struct swap_cluster_info *ci, swp_entry_t entry,
 			       struct folio *old, struct folio *new)
 {
-	int nr_pages = folio_nr_pages(old);
+	unsigned long nr_pages = folio_nr_pages(old);
 	pgoff_t offset = swp_offset(entry);
 	pgoff_t end = offset + nr_pages;
 
 	VM_BUG_ON(nr_pages != folio_nr_pages(new));
 	VM_BUG_ON(entry.val != old->swap.val || entry.val != new->swap.val);
 	VM_BUG_ON(!folio_test_locked(old) || !folio_test_locked(new));
+	VM_BUG_ON_BAD_SWAP_CLUSTER(entry, nr_pages);
 
 	do {
 		if (swp_te_folio(__swap_table_get(ci, offset)) != old)
@@ -123,14 +124,15 @@ struct folio *swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
 	struct swap_cluster_info *ci;
 	struct folio *existing = NULL;
 	pgoff_t offset, end, start;
-	unsigned long nr_ents = folio_nr_pages(folio);
+	unsigned long nr_pages = folio_nr_pages(folio);
 
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	VM_BUG_ON_FOLIO(folio_test_swapcache(folio), folio);
 	VM_BUG_ON_FOLIO(!folio_test_swapbacked(folio), folio);
+	VM_BUG_ON_BAD_SWAP_CLUSTER(entry, nr_pages);
 
 	start = swp_offset(entry);
-	end = start + nr_ents;
+	end = start + nr_pages;
 again:
 	offset = start;
 	existing = NULL;
@@ -142,28 +144,20 @@ again:
 			existing = swp_te_folio(exist);
 			goto out_failed;
 		}
-		/*
-		 * XXX: Below may cause OOM due to race with swapout where there
-		 * is a tiny time window that HAS_CACHE is set but folio is not
-		 * in the cache, will be fixed once the HAS_CACHE flag is gone.
-		 */
-		if (swapin && __swap_cache_set_map(si, ci, offset)) {
-			/* If you see no more OOM then' is'st strange*/
-			existing = swp_te_folio(__swap_table_get(ci, offset));
+		if (swapin && !__swap_count(si, offset))
 			goto out_failed;
-		}
 		if (shadow && swp_te_is_shadow(exist))
 			*shadow = swp_te_shadow(exist);
-		__swap_table_set(ci, offset, folio_swp_te(folio));
+		__swap_table_set_folio(ci, offset, folio);
 	} while (++offset < end);
 
-	folio_ref_add(folio, nr_ents);
+	folio_ref_add(folio, nr_pages);
 	folio_set_swapcache(folio);
 	folio->swap = entry;
 	swap_unlock_cluster(ci);
 
-	node_stat_mod_folio(folio, NR_FILE_PAGES, nr_ents);
-	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, nr_ents);
+	node_stat_mod_folio(folio, NR_FILE_PAGES, nr_pages);
+	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, nr_pages);
 
 	return folio;
 
@@ -172,10 +166,8 @@ out_failed:
 	 * We may lose shadow due to raced swapin, which should be
 	 * fine, caller better keep the previous returned shadow.
 	 */
-	while (offset-- > start) {
-		__swap_table_set(ci, offset, null_swp_te());
-		__swap_cache_put_map(si, ci, offset);
-	}
+	while (offset-- > start)
+		__swap_table_set_null(ci, offset);
 	swap_unlock_cluster(ci);
 
 	/*
@@ -205,27 +197,48 @@ void __swap_cache_del_folio(swp_entry_t entry,
 			    struct folio *folio, void *shadow)
 {
 	swp_te_t exist;
+	struct swap_info_struct *si;
 	struct swap_cluster_info *ci;
+	bool folio_swapped = false, need_free = false;
 	pgoff_t offset = swp_offset(entry), end;
-	unsigned long nr = folio_nr_pages(folio);
+	unsigned long nr_pages = folio_nr_pages(folio);
 
 	VM_BUG_ON(shadow && !xa_is_value(shadow));
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	VM_BUG_ON_FOLIO(!folio_test_swapcache(folio), folio);
 	VM_BUG_ON_FOLIO(folio_test_writeback(folio), folio);
 
-	ci = swp_offset_cluster(swp_info(entry), offset);
-	end = offset + nr;
+	si = swp_info(entry);
+	ci = swp_offset_cluster(si, offset);
+	end = offset + nr_pages;
+
 	do {
 		exist = __swap_table_get(ci, offset);
 		VM_BUG_ON(swp_te_folio(exist) != folio);
-		__swap_table_set(ci, offset, shadow_swp_te(shadow));
+		__swap_table_set_shadow(ci, offset, shadow);
+		if (__swap_count(si, offset))
+			folio_swapped = true;
+		else
+			need_free = true;
 	} while (++offset < end);
 
 	folio->swap.val = 0;
 	folio_clear_swapcache(folio);
-	node_stat_mod_folio(folio, NR_FILE_PAGES, -nr);
-	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr);
+	node_stat_mod_folio(folio, NR_FILE_PAGES, -nr_pages);
+	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr_pages);
+
+	if (!folio_swapped) {
+		swap_entries_free(swp_info(entry), ci, entry, nr_pages);
+	} else if (need_free) {
+		offset = swp_offset(entry);
+		while (nr_pages--) {
+			if (!__swap_count(si, offset)) {
+				swap_entries_free(swp_info(entry), ci,
+						  swp_entry(si->type, offset), 1);
+			}
+			offset++;
+		}
+	}
 }
 
 void delete_from_swap_cache(struct folio *folio)
@@ -237,7 +250,6 @@ void delete_from_swap_cache(struct folio *folio)
 	__swap_cache_del_folio(entry, folio, NULL);
 	swap_unlock_cluster(ci);
 
-	put_swap_folio(folio, entry);
 	folio_ref_sub(folio, folio_nr_pages(folio));
 }
 
@@ -255,9 +267,16 @@ void __swap_cache_clear_shadow(swp_entry_t entry, int nr_ents)
 	ci = swp_offset_cluster(swp_info(entry), offset);
 	end = offset + nr_ents;
 	do {
-		VM_BUG_ON(swp_te_folio(__swap_table_get(ci, offset)));
-		__swap_table_set(ci, offset, null_swp_te());
+		VM_BUG_ON(swp_te_is_folio(__swap_table_get(ci, offset)));
+		__swap_table_set_null(ci, offset);
 	} while (++offset < end);
+}
+
+/* An racy check if an entry is in swap cache. */
+bool __swap_has_cache(struct swap_info_struct *si, pgoff_t offset)
+{
+	struct swap_cluster_info *ci = swp_offset_cluster(si, offset);
+	return swp_te_is_folio(__swap_table_get(ci, offset));
 }
 
 /*

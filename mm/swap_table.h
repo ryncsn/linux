@@ -1,3 +1,6 @@
+#ifndef _MM_SWAP_TABLE_H
+#define _MM_SWAP_TABLE_H
+
 #include "swap.h"
 
 /*

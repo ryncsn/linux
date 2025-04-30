@@ -134,12 +134,11 @@ static inline void swap_unlock_cluster_irq(struct swap_cluster_info *ci)
 
 extern int __swap_count(struct swap_info_struct *si,
 			unsigned long offset);
-extern int __swap_cache_set_map(struct swap_info_struct *si,
-				struct swap_cluster_info *ci,
-				unsigned long offset);
-extern int __swap_cache_put_map(struct swap_info_struct *si,
-				struct swap_cluster_info *ci,
-				unsigned long offset);
+extern bool __swap_has_cache(struct swap_info_struct *si,
+			     pgoff_t offset);
+extern void swap_entries_free(struct swap_info_struct *si,
+			      struct swap_cluster_info *ci,
+			      swp_entry_t entry, unsigned int nr_pages);
 
 /* linux/mm/page_io.c */
 int sio_pool_init(void);
