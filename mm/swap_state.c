@@ -358,54 +358,26 @@ void swap_update_readahead(struct folio *folio,
 	}
 }
 
-struct folio *__swapin_cache_alloc(swp_entry_t entry, gfp_t gfp_mask,
-		struct mempolicy *mpol, pgoff_t ilx, bool *new_page_allocated,
-		bool skip_if_exists)
+static struct folio *__swapin_cache_add_prepare(swp_entry_t entry,
+						struct folio *folio,
+						bool skip_if_exists)
 {
-	struct swap_info_struct *si = swp_info(entry);
-	struct folio *folio;
-	struct folio *new_folio = NULL;
-	struct folio *result = NULL;
+	int nr_pages = folio_nr_pages(folio);
+	struct folio *exist;
 	void *shadow = NULL;
+	int err;
 
-	*new_page_allocated = false;
 	for (;;) {
-		int err;
-
 		/*
-		 * Check the swap cache first, if a cached folio is found,
-		 * return it unlocked. The caller will lock and check it.
+		 * Caller should have checked swap cache and swap count,
+		 * try prepare the swap cache map directly, it will still
+		 * fail with ENOENT if the entry is gone.
 		 */
-		folio = swap_cache_get_folio(entry);
-		if (folio)
-			goto got_folio;
-
-		/*
-		 * Just skip read ahead for unused swap slot.
-		 */
-		if (!swap_entry_swapped(si, entry))
-			goto put_and_return;
-
-		/*
-		 * Get a new folio to read into from swap.  Allocate it now if
-		 * new_folio not exist, before marking swap_map SWAP_HAS_CACHE,
-		 * when -EEXIST will cause any racers to loop around until we
-		 * add it to cache.
-		 */
-		if (!new_folio) {
-			new_folio = folio_alloc_mpol(gfp_mask, 0, mpol, ilx, numa_node_id());
-			if (!new_folio)
-				goto put_and_return;
-		}
-
-		/*
-		 * Swap entry may have been freed since our caller observed it.
-		 */
-		err = swapcache_prepare(entry, 1);
+		err = swapcache_prepare(entry, nr_pages);
 		if (!err)
 			break;
 		else if (err != -EEXIST)
-			goto put_and_return;
+			return NULL;
 
 		/*
 		 * Protect against a recursive call to __swapin_cache_alloc()
@@ -416,7 +388,11 @@ struct folio *__swapin_cache_alloc(swp_entry_t entry, gfp_t gfp_mask,
 		 * __swapin_cache_alloc() in the writeback path.
 		 */
 		if (skip_if_exists)
-			goto put_and_return;
+			return NULL;
+
+		exist = swap_cache_get_folio(entry);
+		if (exist)
+			return exist;
 
 		/*
 		 * We might race against __swap_cache_del_folio(), and
@@ -431,35 +407,94 @@ struct folio *__swapin_cache_alloc(swp_entry_t entry, gfp_t gfp_mask,
 	/*
 	 * The swap entry is ours to swap in. Prepare the new folio.
 	 */
-	__folio_set_locked(new_folio);
-	__folio_set_swapbacked(new_folio);
+	__folio_set_locked(folio);
+	__folio_set_swapbacked(folio);
 
-	if (mem_cgroup_swapin_charge_folio(new_folio, NULL, gfp_mask, entry))
-		goto fail_unlock;
-
-	if (swap_cache_add_folio(entry, new_folio, &shadow))
+	if (swap_cache_add_folio(entry, folio, &shadow))
 		goto fail_unlock;
 
 	memcg1_swapin(entry, 1);
 
 	if (shadow)
-		workingset_refault(new_folio, shadow);
+		workingset_refault(folio, shadow);
 
 	/* Caller will initiate read into locked new_folio */
-	folio_add_lru(new_folio);
-	*new_page_allocated = true;
-	folio = new_folio;
-got_folio:
-	result = folio;
-	goto put_and_return;
+	folio_add_lru(folio);
+	return folio;
 
 fail_unlock:
-	put_swap_folio(new_folio, entry);
-	folio_unlock(new_folio);
-put_and_return:
-	if (!(*new_page_allocated) && new_folio)
-		folio_put(new_folio);
-	return result;
+	put_swap_folio(folio, entry);
+	folio_unlock(folio);
+	return NULL;
+}
+
+struct folio *__swapin_cache_alloc(swp_entry_t entry, gfp_t gfp_mask,
+		struct mempolicy *mpol, pgoff_t ilx, bool *new_page_allocated,
+		bool skip_if_exists)
+{
+	struct swap_info_struct *si = swp_info(entry);
+	struct folio *swapcache = NULL, *folio = NULL;
+
+	/*
+	 * First check the swap cache, caller will check if the
+	 * folio is still valid.
+	 */
+	swapcache = swap_cache_get_folio(entry);
+	if (swapcache)
+		goto out;
+
+	/*
+	 * Just skip read ahead for unused swap slot.
+	 */
+	if (!swap_entry_swapped(si, entry))
+		goto out;
+
+	/*
+	 * Get a new folio to read into from swap.  Allocate it now if
+	 * new_folio not exist, before marking swap_map SWAP_HAS_CACHE,
+	 * when -EEXIST will cause any racers to loop around until we
+	 * add it to cache.
+	 */
+	folio = folio_alloc_mpol(gfp_mask, 0, mpol, ilx, numa_node_id());
+	if (!folio)
+		goto out;
+
+	if (mem_cgroup_swapin_charge_folio(folio, NULL, gfp_mask, entry))
+		goto out;
+
+	swapcache = __swapin_cache_add_prepare(entry, folio, skip_if_exists);
+out:
+	if (swapcache && swapcache == folio) {
+		*new_page_allocated = true;
+	} else {
+		if (folio)
+			folio_put(folio);
+		*new_page_allocated = false;
+	}
+
+	return swapcache;
+}
+
+/**
+ * swapin_entry - swap-in one or multiple entries skipping readahead
+ *
+ * @entry: swap entry to swap in
+ * @folio: pre allocated folio
+ *
+ * Reads @entry into @folio. @folio will be added to swap cache first, if
+ * this raced with another users, only one user will successfully add its
+ * folio into swap cache, and that folio will be returned for all readers.
+ */
+struct folio *swapin_entry(swp_entry_t entry, struct folio *folio)
+{
+	struct folio *swapcache;
+
+	VM_WARN_ON(!IS_ALIGNED(entry.val, folio_nr_pages(folio)));
+	swapcache = __swapin_cache_add_prepare(entry, folio, false);
+	if (swapcache == folio)
+		swap_read_folio(folio, NULL);
+
+	return swapcache;
 }
 
 /*
