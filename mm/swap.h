@@ -9,6 +9,8 @@ extern int page_cluster;
 #include <linux/swapops.h> /* for swp_offset */
 #include <linux/blk_types.h> /* for bio_end_io_t */
 
+extern struct swap_info_struct *swap_info[];
+
 /*
  * We use this to track usage of a cluster. A cluster is a block of swap disk
  * space with SWAPFILE_CLUSTER pages long and naturally aligns in disk. All
@@ -57,9 +59,33 @@ enum swap_cluster_flags {
 	VM_BUG_ON((swp_offset(entry) + (nr_ents) - 1) / SWAPFILE_CLUSTER != \
 		  (swp_offset(entry)) / SWAPFILE_CLUSTER)
 
+/*
+ * All swp_* helper below requires the caller to ensure the swap entry
+ * or type is valid, and device is pinned.
+ */
+static inline struct swap_info_struct *swp_type_info(int type)
+{
+	struct swap_info_struct *si;
+
+	VM_BUG_ON(type >= MAX_SWAPFILES);
+	si = READ_ONCE(swap_info[type]); /* rcu_dereference() */
+	VM_WARN_ON(percpu_ref_is_zero(&si->users));
+
+	return si;
+}
+
+static inline struct swap_info_struct *swp_info(swp_entry_t entry)
+{
+	struct swap_info_struct *si = swp_type_info(swp_type(entry));
+	VM_WARN_ON(percpu_ref_is_zero(&si->users));
+	VM_WARN_ON(swp_offset(entry) >= si->max);
+	return si;
+}
+
 static inline struct swap_cluster_info *swp_offset_cluster(
 		struct swap_info_struct *si, pgoff_t offset)
 {
+	VM_WARN_ON(percpu_ref_is_zero(&si->users));
 	return &si->cluster_info[offset / SWAPFILE_CLUSTER];
 }
 
@@ -68,6 +94,7 @@ static inline struct swap_cluster_info *swap_lock_cluster(
 		unsigned long offset)
 {
 	struct swap_cluster_info *ci = swp_offset_cluster(si, offset);
+	VM_WARN_ON(percpu_ref_is_zero(&si->users));
 	spin_lock(&ci->lock);
 	return ci;
 }
@@ -160,7 +187,7 @@ void swap_update_readahead(struct folio *folio, struct vm_area_struct *vma,
 
 static inline unsigned int folio_swap_flags(struct folio *folio)
 {
-	return swp_swap_info(folio->swap)->flags;
+	return swp_info(folio->swap)->flags;
 }
 
 /*
@@ -171,7 +198,7 @@ static inline unsigned int folio_swap_flags(struct folio *folio)
 static inline int swap_zeromap_batch(swp_entry_t entry, int max_nr,
 		bool *is_zeromap)
 {
-	struct swap_info_struct *sis = swp_swap_info(entry);
+	struct swap_info_struct *sis = swp_info(entry);
 	unsigned long start = swp_offset(entry);
 	unsigned long end = start + max_nr;
 	bool first_bit;
@@ -190,6 +217,11 @@ static inline int swap_zeromap_batch(swp_entry_t entry, int max_nr,
 
 #else /* CONFIG_SWAP */
 struct swap_iocb;
+static inline struct swap_info_struct *swp_info(swp_entry_t entry)
+{
+	return NULL;
+}
+
 static inline void swap_read_folio(struct folio *folio, struct swap_iocb **plug)
 {
 }
