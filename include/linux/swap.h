@@ -434,7 +434,7 @@ static inline long get_nr_swap_pages(void)
 
 extern void si_swapinfo(struct sysinfo *);
 int folio_alloc_swap(struct folio *folio, gfp_t gfp_mask);
-bool folio_free_swap(struct folio *folio);
+bool folio_try_reclaim_swap(struct folio *folio);
 void put_swap_folio(struct folio *folio, swp_entry_t entry);
 extern swp_entry_t get_swap_page_of_type(int);
 extern int add_swap_count_continuation(swp_entry_t, gfp_t);
@@ -525,7 +525,7 @@ static inline int folio_alloc_swap(struct folio *folio, gfp_t gfp_mask)
 	return -EINVAL;
 }
 
-static inline bool folio_free_swap(struct folio *folio)
+static inline bool folio_try_reclaim_swap(struct folio *folio)
 {
 	return false;
 }

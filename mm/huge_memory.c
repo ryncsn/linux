@@ -1983,7 +1983,7 @@ vm_fault_t do_huge_pmd_wp_page(struct vm_fault *vmf)
 			1 + folio_test_swapcache(folio) * folio_nr_pages(folio))
 		goto unlock_fallback;
 	if (folio_test_swapcache(folio))
-		folio_free_swap(folio);
+		folio_try_reclaim_swap(folio);
 	if (folio_ref_count(folio) == 1) {
 		pmd_t entry;
 

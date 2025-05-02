@@ -1426,7 +1426,7 @@ static int replace_page(struct vm_area_struct *vma, struct page *page,
 
 	folio_remove_rmap_pte(folio, page, vma);
 	if (!folio_mapped(folio))
-		folio_free_swap(folio);
+		folio_try_reclaim_swap(folio);
 	folio_put(folio);
 
 	pte_unmap_unlock(ptep, ptl);

@@ -760,7 +760,7 @@ static void __migrate_device_pages(unsigned long *src_pfns,
 				 * Try to get rid of swap cache if possible.
 				 */
 				if (!folio_test_anon(folio) ||
-				    !folio_free_swap(folio)) {
+				    !folio_try_reclaim_swap(folio)) {
 					src_pfns[i] &= ~MIGRATE_PFN_MIGRATE;
 					continue;
 				}

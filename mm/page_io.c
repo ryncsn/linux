@@ -242,7 +242,7 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
 	struct folio *folio = page_folio(page);
 	int ret;
 
-	if (folio_free_swap(folio)) {
+	if (folio_try_reclaim_swap(folio)) {
 		folio_unlock(folio);
 		return 0;
 	}

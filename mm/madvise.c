@@ -767,7 +767,7 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 			}
 
 			if (folio_test_swapcache(folio) &&
-			    !folio_free_swap(folio)) {
+			    !folio_try_reclaim_swap(folio)) {
 				folio_unlock(folio);
 				continue;
 			}

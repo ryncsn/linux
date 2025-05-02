@@ -18,7 +18,7 @@
 #include <linux/export.h>
 #include <linux/rmap.h>		/* anon_vma_prepare */
 #include <linux/mmu_notifier.h>
-#include <linux/swap.h>		/* folio_free_swap */
+#include <linux/swap.h>		/* folio_try_reclaim_swap */
 #include <linux/ptrace.h>	/* user_enable_single_step */
 #include <linux/kdebug.h>	/* notifier mechanism */
 #include <linux/percpu-rwsem.h>
@@ -451,7 +451,7 @@ static int __uprobe_write_opcode(struct vm_area_struct *vma,
 	folio_remove_rmap_pte(folio, fw->page, vma);
 	if (!folio_mapped(folio) && folio_test_swapcache(folio) &&
 	     folio_trylock(folio)) {
-		folio_free_swap(folio);
+		folio_try_reclaim_swap(folio);
 		folio_unlock(folio);
 	}
 	folio_put(folio);

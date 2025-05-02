@@ -234,7 +234,7 @@ again:
 	 * When this function is called from scan_swap_map_slots() and it's
 	 * called by vmscan.c at reclaiming folios. So we hold a folio lock
 	 * here. We have to use trylock for avoiding deadlock. This is a special
-	 * case and you should use folio_free_swap() with explicit folio_lock()
+	 * case and you should use folio_try_reclaim_swap() with explicit folio_lock()
 	 * in usual operations.
 	 */
 	if (!folio_trylock(folio))
@@ -1710,7 +1710,7 @@ static bool folio_swapcache_freeable(struct folio *folio)
 
 	/*
 	 * Once hibernation has begun to create its image of memory,
-	 * there's a danger that one of the calls to folio_free_swap()
+	 * there's a danger that one of the calls to folio_try_reclaim_swap()
 	 * - most probably a call from __try_to_reclaim_swap() while
 	 * hibernation is allocating its own swap pages for the image,
 	 * but conceivably even a call from memory reclaim - will free
@@ -1730,15 +1730,15 @@ static bool folio_swapcache_freeable(struct folio *folio)
 }
 
 /**
- * folio_free_swap() - Free the swap space used for this folio.
+ * folio_try_reclaim_swap() - Free the swap space used for this folio.
  * @folio: The folio to remove.
  *
  * If swap is getting full, or if there are no more mappings of this folio,
- * then call folio_free_swap to free its swap space.
+ * then call folio_try_reclaim_swap to free its swap space.
  *
  * Return: true if we were able to release the swap space.
  */
-bool folio_free_swap(struct folio *folio)
+bool folio_try_reclaim_swap(struct folio *folio)
 {
 	if (!folio_swapcache_freeable(folio))
 		return false;
@@ -2116,7 +2116,7 @@ static int unuse_pte_range(struct vm_area_struct *vma, pmd_t *pmd,
 			return ret;
 		}
 
-		folio_free_swap(folio);
+		folio_try_reclaim_swap(folio);
 		folio_unlock(folio);
 		folio_put(folio);
 	} while (addr += PAGE_SIZE, addr != end);
@@ -2323,11 +2323,11 @@ retry:
 		 * It is conceivable that a racing task removed this folio from
 		 * swap cache just before we acquired the page lock. The folio
 		 * might even be back in swap cache on another swap area. But
-		 * that is okay, folio_free_swap() only removes stale folios.
+		 * that is okay, folio_try_reclaim_swap() only removes stale folios.
 		 */
 		folio_lock(folio);
 		folio_wait_writeback(folio);
-		folio_free_swap(folio);
+		folio_try_reclaim_swap(folio);
 		folio_unlock(folio);
 		folio_put(folio);
 	}
