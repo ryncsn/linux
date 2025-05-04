@@ -1,4 +1,3 @@
-
 /*
  *  linux/mm/swapfile.c
  *
@@ -58,6 +57,9 @@ static void swap_entries_free(struct swap_info_struct *si,
 			      swp_entry_t entry, unsigned int nr_pages);
 static void swap_range_alloc(struct swap_info_struct *si,
 			     unsigned int nr_entries);
+static int __swap_duplicate(swp_entry_t entry, unsigned char usage, int nr);
+static bool swap_entries_put_map(struct swap_info_struct *si,
+				 swp_entry_t entry, int nr);
 static bool folio_swapcache_freeable(struct folio *folio);
 
 static DEFINE_SPINLOCK(swap_lock);
@@ -1240,7 +1242,6 @@ start_over:
 /**
  * folio_alloc_swap - allocate swap space for a folio
  * @folio: folio we want to move to swap
- * @gfp: gfp mask for shadow nodes
  *
  * Allocate swap space for the folio and add the folio to the
  * swap cache.
@@ -1298,6 +1299,57 @@ int folio_alloc_swap(struct folio *folio, gfp_t gfp)
 out_free:
 	put_swap_folio(folio, entry);
 	return -ENOMEM;
+}
+
+/*
+ * folio_dup_swap() - Increase ref count of swap entries allocated to a folio.
+ *
+ * @folio: the folio with swap entries allocated.
+ * @subpage: if not NULL, only increase the ref count of this subpage.
+ */
+int folio_dup_swap(struct folio *folio, struct page *subpage)
+{
+	int err = 0;
+	swp_entry_t entry = folio->swap;
+	unsigned long nr_pages = folio_nr_pages(folio);
+
+	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+	VM_BUG_ON_FOLIO(!folio_test_swapcache(folio), folio);
+
+	if (subpage) {
+		entry.val += folio_page_idx(folio, subpage);
+		nr_pages = 1;
+	}
+
+	while (!err && __swap_duplicate(entry, 1, nr_pages) == -ENOMEM)
+		err = add_swap_count_continuation(entry, GFP_ATOMIC);
+
+	return err;
+}
+
+/*
+ * folio_put_swap() - Decrease ref count of swap entries allocated to a folio.
+ *
+ * @folio: the folio with swap entries allocated.
+ * @subpage: if not NULL, only decrease the ref count of this subpage.
+ *
+ * This won't remove the folio from swap cache, so the swap entry may
+ * still be pinned by the swap cache.
+ */
+void folio_put_swap(struct folio *folio, struct page *subpage)
+{
+	swp_entry_t entry = folio->swap;
+	unsigned long nr_pages = folio_nr_pages(folio);
+
+	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+	VM_BUG_ON_FOLIO(!folio_test_swapcache(folio), folio);
+
+	if (subpage) {
+		entry.val += folio_page_idx(folio, subpage);
+		nr_pages = 1;
+	}
+
+	swap_entries_put_map(swp_info(entry), entry, nr_pages);
 }
 
 static struct swap_info_struct *_swap_info_get(swp_entry_t entry)
@@ -1541,28 +1593,6 @@ static void swap_entries_free(struct swap_info_struct *si,
 }
 
 /*
- * Caller has made sure that the swap device corresponding to entry
- * is still around or has not been recycled.
- */
-void swap_free_nr(swp_entry_t entry, int nr_pages)
-{
-	int nr;
-	struct swap_info_struct *sis;
-	unsigned long offset = swp_offset(entry);
-
-	sis = _swap_info_get(entry);
-	if (!sis)
-		return;
-
-	while (nr_pages) {
-		nr = min_t(int, nr_pages, SWAPFILE_CLUSTER - offset % SWAPFILE_CLUSTER);
-		swap_entries_put_map(sis, swp_entry(sis->type, offset), nr);
-		offset += nr;
-		nr_pages -= nr;
-	}
-}
-
-/*
  * Called after dropping swapcache to decrease refcnt to swap entries.
  */
 void put_swap_folio(struct folio *folio, swp_entry_t entry)
@@ -1751,16 +1781,21 @@ bool folio_try_reclaim_swap(struct folio *folio)
 }
 
 /**
- * free_swap_and_cache_nr() - Release reference on range of swap entries and
- *                            reclaim their cache if no more references remain.
+ * do_put_swap_entries() - Release reference on range of swap entries and
+ *                      reclaim their cache if no more references remain.
  * @entry: First entry of range.
  * @nr: Number of entries in range.
  *
  * For each swap entry in the contiguous range, release a reference. If any swap
  * entries become free, try to reclaim their underlying folios, if present. The
  * offset range is defined by [entry.offset, entry.offset + nr).
+ *
+ * Context: Called when page table or mapping get released direct without swap
+ * in, caller must ensure the entries won't get complete released during this
+ * period. For page table releasing, this is protected by page table lock.
+ * For shmem, this is protected by the cmpxchg of the mapping value.
  */
-void free_swap_and_cache_nr(swp_entry_t entry, int nr)
+void do_put_swap_entries(swp_entry_t entry, int nr)
 {
 	const unsigned long start_offset = swp_offset(entry);
 	const unsigned long end_offset = start_offset + nr;
@@ -1769,10 +1804,9 @@ void free_swap_and_cache_nr(swp_entry_t entry, int nr)
 	unsigned long offset;
 
 	si = get_swap_device(entry);
-	if (!si)
+	if (WARN_ON_ONCE(!si))
 		return;
-
-	if (WARN_ON(end_offset > si->max))
+	if (WARN_ON_ONCE(end_offset > si->max))
 		goto out;
 
 	/*
@@ -1816,7 +1850,6 @@ out:
 }
 
 #ifdef CONFIG_HIBERNATION
-
 swp_entry_t get_swap_page_of_type(int type)
 {
 	struct swap_info_struct *si = swp_type_get_info(type);
@@ -1839,6 +1872,22 @@ swp_entry_t get_swap_page_of_type(int type)
 	}
 fail:
 	return entry;
+}
+
+/*
+ * Free entries allocated by get_swap_page_of_type, these entries are
+ * exclusive for hibernation.
+ */
+void free_swap_page_of_entry(swp_entry_t entry)
+{
+	struct swap_info_struct *si = swp_info(entry);
+	pgoff_t offset = swp_offset(entry);
+	struct swap_cluster_info *ci;
+	if (!si)
+		return;
+	ci = swap_lock_cluster(si, offset);
+	WARN_ON(swap_entry_put_locked(si, ci, entry, 1));
+	swap_unlock_cluster(ci);
 }
 
 /*
@@ -1995,7 +2044,7 @@ static int unuse_pte(struct vm_area_struct *vma, pmd_t *pmd,
 	/*
 	 * Some architectures may have to restore extra metadata to the page
 	 * when reading from swap. This metadata may be indexed by swap entry
-	 * so this must be called before swap_free().
+	 * so this must be called before folio_put_swap().
 	 */
 	arch_swap_restore(folio_swap(entry, folio), folio);
 
@@ -2036,7 +2085,7 @@ static int unuse_pte(struct vm_area_struct *vma, pmd_t *pmd,
 		new_pte = pte_mkuffd_wp(new_pte);
 setpte:
 	set_pte_at(vma->vm_mm, addr, pte, new_pte);
-	swap_free(entry);
+	folio_put_swap(folio, page);
 out:
 	if (pte)
 		pte_unmap_unlock(pte, ptl);
@@ -3579,27 +3628,23 @@ static int __swap_duplicate(swp_entry_t entry, unsigned char usage, int nr)
 }
 
 /**
- * swap_duplicate_nr() - Increase reference count of nr contiguous swap entries
- *                       by 1.
+ * do_dup_swap_entry() - Increase reference count of a swap entry by one.
  *
  * @entry: first swap entry from which we want to increase the refcount.
- * @nr: Number of entries in range.
  *
  * Returns 0 for success, or -ENOMEM if a swap_count_continuation is required
  * but could not be atomically allocated.  Returns 0, just as if it succeeded,
  * if __swap_duplicate() fails for another reason (-EINVAL or -ENOENT), which
  * might occur if a page table entry has got corrupted.
  *
- * Note that we are currently not handling the case where nr > 1 and we need to
- * add swap count continuation. This is OK, because no such user exists - shmem
- * is the only user that can pass nr > 1, and it never re-duplicates any swap
- * entry it owns.
+ * Context: The caller must ensure the entry won't be completely release during
+ * the period. Currently this is only used by forking, the page table is locked
+ * to protect the entry from being freed.
  */
-int swap_duplicate_nr(swp_entry_t entry, int nr)
+int do_dup_swap_entry(swp_entry_t entry)
 {
 	int err = 0;
-
-	while (!err && __swap_duplicate(entry, 1, nr) == -ENOMEM)
+	while (!err && __swap_duplicate(entry, 1, 1) == -ENOMEM)
 		err = add_swap_count_continuation(entry, GFP_ATOMIC);
 	return err;
 }

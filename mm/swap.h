@@ -147,6 +147,20 @@ extern int __swap_cache_put_map(struct swap_info_struct *si,
 				struct swap_cluster_info *ci,
 				unsigned long offset);
 
+/*
+ * All swap entries starts getting allocated by folio_alloc_swap(),
+ * and the folio will be added to swap cache.
+ *
+ * Swap out (pageout) unmaps a folio and increased the swap table entry
+ * count with folio_dup_swap.
+ *
+ * Swap in maps a folio in swap cache and decrease the swap table entry
+ * count with folio_put_swap.
+ */
+int folio_alloc_swap(struct folio *folio, gfp_t gfp_mask);
+int folio_dup_swap(struct folio *folio, struct page *subpage);
+void folio_put_swap(struct folio *folio, struct page *subpage);
+
 /* linux/mm/page_io.c */
 int sio_pool_init(void);
 struct swap_iocb;
@@ -267,6 +281,18 @@ struct swap_iocb;
 static inline struct swap_info_struct *swp_info(swp_entry_t entry)
 {
 	return NULL;
+}
+
+static inline int folio_alloc_swap(struct folio *, gfp_t)
+{
+}
+
+static inline int folio_dup_swap(struct folio *, struct page *)
+{
+}
+
+static inline void folio_put_swap(struct folio *, struct page *)
+{
 }
 
 static inline void swap_read_folio(struct folio *folio, struct swap_iocb **plug)
