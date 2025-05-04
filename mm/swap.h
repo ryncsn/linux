@@ -316,10 +316,6 @@ static inline int swap_writepage(struct page *p, struct writeback_control *wbc)
 	return 0;
 }
 
-static inline void swapcache_clear(struct swap_info_struct *si, swp_entry_t entry, int nr)
-{
-}
-
 static inline int swap_cache_swapon(int type, unsigned long max_pages)
 {
 	return 0;
