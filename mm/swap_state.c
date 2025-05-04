@@ -112,12 +112,18 @@ int __swap_cache_replace_folio(struct swap_cluster_info *ci, swp_entry_t entry,
 	return 0;
 }
 
-int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
-			 void **shadow)
+/*
+ * Return the folio being added on success, or return
+ * an existing folio.
+ */
+struct folio *swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
+				   void **shadow, bool swapin)
 {
 	swp_te_t exist;
-	struct swap_cluster_info *ci;
 	pgoff_t end, start, offset;
+	struct swap_info_struct *si;
+	struct swap_cluster_info *ci;
+	struct folio *existing = NULL;
 	unsigned long nr_pages = folio_nr_pages(folio);
 
 	start = swp_offset(entry);
@@ -126,12 +132,23 @@ int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	VM_BUG_ON_FOLIO(folio_test_swapcache(folio), folio);
 	VM_BUG_ON_FOLIO(!folio_test_swapbacked(folio), folio);
-
+again:
 	offset = start;
-	ci = swap_lock_cluster(swp_info(entry), offset);
+	existing = NULL;
+	si = swp_info(entry);
+	ci = swap_lock_cluster(si, offset);
 	do {
 		exist = __swap_table_get(ci, offset);
-		if (unlikely(swp_te_is_folio(exist)))
+		if (unlikely(swp_te_is_folio(exist))) {
+			existing = swp_te_folio(exist);
+			goto out_failed;
+		}
+		/*
+		 * XXX: Below may cause OOM due to race with swapout where there
+		 * is a tiny time window that HAS_CACHE is set but folio is not
+		 * in the cache, will be fixed once the HAS_CACHE flag is gone.
+		 */
+		if (swapin && __swap_cache_set_map(si, ci, offset))
 			goto out_failed;
 		if (shadow && swp_te_is_shadow(exist))
 			*shadow = swp_te_shadow(exist);
@@ -146,18 +163,35 @@ int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
 	node_stat_mod_folio(folio, NR_FILE_PAGES, nr_pages);
 	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, nr_pages);
 
-	return 0;
+	return folio;
 
 out_failed:
 	/*
 	 * We may lose shadow due to raced swapin, which should be
 	 * fine, caller better keep the previous returned shadow.
 	 */
-	while (offset-- > start)
+	while (offset-- > start) {
 		__swap_table_set_null(ci, offset);
+		__swap_cache_put_map(si, ci, offset);
+	}
 	swap_unlock_cluster(ci);
 
-	return -EEXIST;
+	/*
+	 * Swapin is a bit special as concurrent fault may try insert folio
+	 * for overlapped entries, return the conflicted folio so caller can
+	 * wait on it instead.
+	 */
+	if (swapin && existing) {
+		if (folio_try_get(existing)) {
+			if (folio_test_swapcache(existing))
+				return existing;
+			folio_put(existing);
+		}
+		/* The conflicting folio is just gone, try again */
+		goto again;
+	}
+
+	return NULL;
 }
 
 /*
@@ -362,56 +396,17 @@ static struct folio *__swapin_cache_add_prepare(swp_entry_t entry,
 						struct folio *folio,
 						bool skip_if_exists)
 {
-	int nr_pages = folio_nr_pages(folio);
-	struct folio *exist;
 	void *shadow = NULL;
-	int err;
+	struct folio *swapcache = NULL;
 
-	for (;;) {
-		/*
-		 * Caller should have checked swap cache and swap count,
-		 * try prepare the swap cache map directly, it will still
-		 * fail with ENOENT if the entry is gone.
-		 */
-		err = swapcache_prepare(entry, nr_pages);
-		if (!err)
-			break;
-		else if (err != -EEXIST)
-			return NULL;
-
-		/*
-		 * Protect against a recursive call to __swapin_cache_alloc()
-		 * on the same entry waiting forever here because SWAP_HAS_CACHE
-		 * is set but the folio is not the swap cache yet. This can
-		 * happen today if mem_cgroup_swapin_charge_folio() below
-		 * triggers reclaim through zswap, which may call
-		 * __swapin_cache_alloc() in the writeback path.
-		 */
-		if (skip_if_exists)
-			return NULL;
-
-		exist = swap_cache_get_folio(entry);
-		if (exist)
-			return exist;
-
-		/*
-		 * We might race against __swap_cache_del_folio(), and
-		 * stumble across a swap_map entry whose SWAP_HAS_CACHE
-		 * has not yet been cleared.  Or race against another
-		 * __swapin_cache_alloc(), which has set SWAP_HAS_CACHE
-		 * in swap_map, but not yet added its folio to swap cache.
-		 */
-		schedule_timeout_uninterruptible(1);
-	}
-
-	/*
-	 * The swap entry is ours to swap in. Prepare the new folio.
-	 */
+	/* Prepare the new folio for swapin. */
 	__folio_set_locked(folio);
 	__folio_set_swapbacked(folio);
-
-	if (swap_cache_add_folio(entry, folio, &shadow))
-		goto fail_unlock;
+	swapcache = swap_cache_add_folio(entry, folio, &shadow, true);
+	if (swapcache != folio) {
+		folio_unlock(folio);
+		return swapcache;
+	}
 
 	memcg1_swapin(entry, 1);
 
@@ -421,11 +416,6 @@ static struct folio *__swapin_cache_add_prepare(swp_entry_t entry,
 	/* Caller will initiate read into locked new_folio */
 	folio_add_lru(folio);
 	return folio;
-
-fail_unlock:
-	put_swap_folio(folio, entry);
-	folio_unlock(folio);
-	return NULL;
 }
 
 struct folio *__swapin_cache_alloc(swp_entry_t entry, gfp_t gfp_mask,

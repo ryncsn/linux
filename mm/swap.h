@@ -140,6 +140,13 @@ static inline void swap_unlock_cluster_irq(struct swap_cluster_info *ci)
 	spin_unlock_irq(&ci->lock);
 }
 
+extern int __swap_cache_set_map(struct swap_info_struct *si,
+				struct swap_cluster_info *ci,
+				unsigned long offset);
+extern int __swap_cache_put_map(struct swap_info_struct *si,
+				struct swap_cluster_info *ci,
+				unsigned long offset);
+
 /* linux/mm/page_io.c */
 int sio_pool_init(void);
 struct swap_iocb;
@@ -163,10 +170,9 @@ static inline struct address_space *swap_address_space(swp_entry_t entry)
 
 /* Below helpers requires caller to pin the swap device */
 extern struct folio *swap_cache_get_folio(swp_entry_t entry);
-extern int swap_cache_add_folio(swp_entry_t entry,
-				struct folio *folio, void **shadow);
+extern struct folio *swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
+					  void **shadow, bool swapin);
 extern void *swap_cache_get_shadow(swp_entry_t entry);
-/* Below helpers needs the swap cluster locked */
 extern void __swap_cache_del_folio(swp_entry_t entry,
 				   struct folio *folio, void *shadow);
 extern int __swap_cache_replace_folio(struct swap_cluster_info *ci,
@@ -200,8 +206,8 @@ static inline pgoff_t swap_cache_index(swp_entry_t entry)
  */
 static inline bool folio_swap_contains(struct folio *folio, swp_entry_t entry)
 {
-	pgoff_t index = swp_offset(entry);
 	VM_BUG_ON(!folio_test_locked(folio));
+	pgoff_t index = swp_offset(entry);
 	if (unlikely(!folio_test_swapcache(folio)))
 		return false;
 	if (unlikely(swp_type(entry) != swp_type(folio->swap)))
@@ -330,10 +336,9 @@ static inline struct folio *swap_cache_get_folio(swp_entry_t entry)
 	return NULL;
 }
 
-static inline int swap_cache_add_folio(swp_entry_t, struct folio *, void **);
-{
-	return -EINVAL;
-}
+static inline struct folio *swap_cache_add_folio(swp_entry_t entry,
+						 struct folio *folio,
+						 void **shadow, bool swapin);
 
 static inline void __swap_cache_del_folio(struct folio *, swp_entry_t, void *)
 {

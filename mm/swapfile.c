@@ -1256,6 +1256,7 @@ int folio_alloc_swap(struct folio *folio, gfp_t gfp)
 
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	VM_BUG_ON_FOLIO(!folio_test_uptodate(folio), folio);
+	VM_BUG_ON_FOLIO(folio_test_swapcache(folio), folio);
 
 	/*
 	 * Should not even be attempting large allocations when huge
@@ -1286,8 +1287,10 @@ int folio_alloc_swap(struct folio *folio, gfp_t gfp)
 	 * TODO: this could cause a theoretical memory reclaim
 	 * deadlock in the swap out path.
 	 */
-	if (swap_cache_add_folio(entry, folio, NULL))
+	if (swap_cache_add_folio(entry, folio, NULL, false) != folio) {
+		WARN_ON(1);
 		goto out_free;
+	}
 
 	atomic_long_sub(size, &nr_swap_pages);
 	return 0;
@@ -3601,17 +3604,20 @@ int swap_duplicate_nr(swp_entry_t entry, int nr)
 	return err;
 }
 
-/*
- * @entry: first swap entry from which we allocate nr swap cache.
- *
- * Called when allocating swap cache for existing swap entries,
- * This can return error codes. Returns 0 at success.
- * -EEXIST means there is a swap cache.
- * Note: return code is different from swap_duplicate().
- */
-int swapcache_prepare(swp_entry_t entry, int nr)
+int __swap_cache_set_map(struct swap_info_struct *si,
+			 struct swap_cluster_info *ci,
+			 unsigned long offset)
 {
-	return __swap_duplicate(entry, SWAP_HAS_CACHE, nr);
+	return swap_entry_dup_locked_nr(si, ci, offset, SWAP_HAS_CACHE, 1);
+}
+
+int __swap_cache_put_map(struct swap_info_struct *si,
+			   struct swap_cluster_info *ci,
+			   unsigned long offset)
+{
+	return swap_entry_put_locked(si, ci,
+				     swp_entry(si->type, offset),
+				     SWAP_HAS_CACHE);
 }
 
 /*
