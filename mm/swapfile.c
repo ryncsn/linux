@@ -1367,35 +1367,6 @@ void folio_put_swap(struct folio *folio, struct page *subpage)
 	swap_put_entries(swp_info(entry), swp_offset(entry), nr_pages);
 }
 
-static struct swap_info_struct *_swap_info_get(swp_entry_t entry)
-{
-	struct swap_info_struct *si;
-	unsigned long offset;
-
-	if (!entry.val)
-		goto out;
-	si = swp_get_info(entry);
-	if (!si)
-		goto bad_nofile;
-	if (data_race(!(si->flags & SWP_USED)))
-		goto bad_device;
-	offset = swp_offset(entry);
-	if (offset >= si->max)
-		goto bad_offset;
-	return si;
-
-bad_offset:
-	pr_err("%s: %s%08lx\n", __func__, Bad_offset, entry.val);
-	goto out;
-bad_device:
-	pr_err("%s: %s%08lx\n", __func__, Unused_file, entry.val);
-	goto out;
-bad_nofile:
-	pr_err("%s: %s%08lx\n", __func__, Bad_file, entry.val);
-out:
-	return NULL;
-}
-
 static unsigned char swap_put_entry_locked(struct swap_info_struct *si,
 					   struct swap_cluster_info *ci,
 					   swp_entry_t entry)
@@ -1552,7 +1523,7 @@ int swp_swapcount(swp_entry_t entry)
 	pgoff_t offset;
 	unsigned char *map;
 
-	si = _swap_info_get(entry);
+	si = get_swap_device(entry);
 	if (!si)
 		return 0;
 
@@ -1582,6 +1553,7 @@ int swp_swapcount(swp_entry_t entry)
 	} while (tmp_count & COUNT_CONTINUED);
 out:
 	swap_unlock_cluster(ci);
+	put_swap_device(si);
 	return count;
 }
 
@@ -1616,10 +1588,7 @@ unlock_out:
 static bool folio_swapped(struct folio *folio)
 {
 	swp_entry_t entry = folio->swap;
-	struct swap_info_struct *si = _swap_info_get(entry);
-
-	if (!si)
-		return false;
+	struct swap_info_struct *si = swp_info(entry);
 
 	if (!IS_ENABLED(CONFIG_THP_SWAP) || likely(!folio_test_large(folio)))
 		return swap_entry_swapped(si, entry);
@@ -1631,8 +1600,6 @@ static bool folio_swapcache_freeable(struct folio *folio)
 {
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 
-	if (!folio_test_swapcache(folio))
-		return false;
 	if (folio_test_writeback(folio))
 		return false;
 
@@ -1668,6 +1635,8 @@ static bool folio_swapcache_freeable(struct folio *folio)
  */
 bool folio_try_reclaim_swap(struct folio *folio)
 {
+	if (!folio_test_swapcache(folio))
+		return false;
 	if (!folio_swapcache_freeable(folio))
 		return false;
 	if (folio_swapped(folio))
