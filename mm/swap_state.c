@@ -124,6 +124,7 @@ struct folio *swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
 	struct swap_info_struct *si;
 	struct swap_cluster_info *ci;
 	struct folio *existing = NULL;
+	// int count;
 	unsigned long nr_pages = folio_nr_pages(folio);
 
 	start = swp_offset(entry);
@@ -139,15 +140,18 @@ again:
 	ci = swap_lock_cluster(si, offset);
 	do {
 		exist = __swap_table_get(ci, offset);
+		// count = swp_te_get_count(exist);
 		if (unlikely(swp_te_is_folio(exist))) {
 			existing = swp_te_folio(exist);
 			goto out_failed;
 		}
-		if (swapin && !__swap_count(swp_entry(si->type, offset)))
+		if (swapin && !swp_te_get_count(exist))
 			goto out_failed;
+		VM_WARN_ON_ONCE(!swp_te_is_shadow(exist));
 		if (shadow && swp_te_is_shadow(exist))
 			*shadow = swp_te_shadow(exist);
 		__swap_table_set_folio(ci, offset, folio);
+		// VM_WARN_ON_ONCE(count != swp_te_get_count(__swap_table_get(ci, offset)));
 	} while (++offset < end);
 
 	folio_ref_add(folio, nr_pages);
@@ -166,7 +170,7 @@ out_failed:
 	 * fine, caller better keep the previous returned shadow.
 	 */
 	while (offset-- > start)
-		__swap_table_set_null(ci, offset);
+		__swap_table_set_null_shadow(ci, offset);
 	swap_unlock_cluster(ci);
 
 	/*
@@ -219,7 +223,8 @@ void __swap_cache_del_folio(swp_entry_t entry,
 			__swap_table_set_null_shadow(ci, offset);
 		else
 			__swap_table_set_shadow(ci, offset, shadow);
-		if (__swap_count(swp_entry(si->type, offset)))
+		/* XXX Inline the loop here too */
+		if (swp_te_get_count(exist))
 			folio_swapped = true;
 		else
 			need_free = true;
@@ -235,7 +240,7 @@ void __swap_cache_del_folio(swp_entry_t entry,
 	} else if (need_free) {
 		offset = start;
 		do {
-			if (!__swap_count(swp_entry(si->type, offset)))
+			if (!swp_te_get_count(__swap_table_get(ci, offset)))
 				swap_free_entries(si, ci, offset, 1);
 		} while (++offset < end);
 	}

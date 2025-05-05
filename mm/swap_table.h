@@ -172,22 +172,23 @@ static inline void __swap_table_set_folio(struct swap_cluster_info *ci, pgoff_t 
 	__swap_table_set(ci, off, entry);
 }
 
-static inline void __swap_table_set_null_shadow(struct swap_cluster_info *ci, pgoff_t off)
-{
-	__swap_table_set(ci, off, shadow_swp_te(xa_mk_value(0)));
-}
-
 static inline void __swap_table_set_shadow(struct swap_cluster_info *ci, pgoff_t off,
 					   void *shadow)
 {
 	swp_te_t entry;
 	unsigned char count;
 
+	VM_WARN_ON(!xa_is_value(shadow));
 	entry = __swap_table_get(ci, off);
 	count = swp_te_get_count(entry);
 	entry = swp_te_set_count(shadow_swp_te(shadow), count);
 
 	__swap_table_set(ci, off, entry);
+}
+
+static inline void __swap_table_set_null_shadow(struct swap_cluster_info *ci, pgoff_t off)
+{
+	__swap_table_set_shadow(ci, off, xa_mk_value(0));
 }
 
 static inline void __swap_table_set_null(struct swap_cluster_info *ci, pgoff_t off)
@@ -201,5 +202,7 @@ static inline void __swap_table_set_count(struct swap_cluster_info *ci, pgoff_t 
 	swp_te_t entry;
 	entry = swp_te_set_count(__swap_table_get(ci, off), count);
 	__swap_table_set(ci, off, entry);
+
+	VM_BUG_ON(count != swp_te_get_count(__swap_table_get(ci, off)));
 }
 #endif

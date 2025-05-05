@@ -35,6 +35,7 @@ struct swap_cluster_info {
 	u8 flags;
 	u8 order;
 	swp_te_t *table;
+	unsigned long *extend_table; /* Only used for extended swap count */
 	struct list_head list;
 };
 
@@ -155,6 +156,7 @@ int folio_dup_swap(struct folio *folio, struct page *subpage);
 void folio_put_swap(struct folio *folio, struct page *subpage);
 
 /* For internal use */
+extern int swap_retry_table_alloc(swp_entry_t entry, gfp_t gfp);
 extern void swap_free_entries(struct swap_info_struct *si,
 			      struct swap_cluster_info *ci,
 			      unsigned long offset, unsigned int nr_pages);
@@ -344,6 +346,11 @@ static inline void swap_update_readahead(struct folio *folio,
 static inline int swap_writepage(struct page *p, struct writeback_control *wbc)
 {
 	return 0;
+}
+
+extern int swap_retry_table_alloc(swp_entry_t entry, gfp_t gfp)
+{
+	return -EINVAL;
 }
 
 static inline int swap_cache_swapon(int type, unsigned long max_pages)
