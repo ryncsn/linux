@@ -607,7 +607,9 @@ static void free_cluster(struct swap_info_struct *si, struct swap_cluster_info *
 static void partial_free_cluster(struct swap_info_struct *si,
 				 struct swap_cluster_info *ci)
 {
-	VM_BUG_ON(!ci->count || ci->count == SWAPFILE_CLUSTER);
+	VM_BUG_ON(!ci->count);
+	VM_BUG_ON(ci->count == SWAPFILE_CLUSTER);
+
 	lockdep_assert_held(&ci->lock);
 
 	if (ci->flags != CLUSTER_FLAG_NONFULL)
@@ -732,6 +734,7 @@ static bool cluster_alloc_range(struct swap_info_struct *si, struct swap_cluster
 				unsigned int order)
 {
 	unsigned int nr_pages = 1 << order;
+	unsigned long offset, end = start + nr_pages;
 
 	lockdep_assert_held(&ci->lock);
 
@@ -745,7 +748,11 @@ static bool cluster_alloc_range(struct swap_info_struct *si, struct swap_cluster
 	if (cluster_is_empty(ci))
 		ci->order = order;
 
-	memset(si->swap_map + start, usage, nr_pages);
+	for (offset = start; offset < end; offset++) {
+		VM_WARN_ON_ONCE(swap_count(si->swap_map[offset]));
+		VM_WARN_ON_ONCE(!swp_te_is_null(__swap_table_get(ci, offset)));
+		si->swap_map[offset] = usage;
+	}
 	swap_range_alloc(si, nr_pages);
 	ci->count += nr_pages;
 
