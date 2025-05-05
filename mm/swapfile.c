@@ -52,14 +52,16 @@
 static bool swap_count_continued(struct swap_info_struct *, pgoff_t,
 				 unsigned char);
 static void free_swap_count_continuations(struct swap_info_struct *);
-static void swap_entries_free(struct swap_info_struct *si,
+static void swap_free_entries(struct swap_info_struct *si,
 			      struct swap_cluster_info *ci,
-			      swp_entry_t entry, unsigned int nr_pages);
+			      unsigned long start, unsigned int nr_pages);
 static void swap_range_alloc(struct swap_info_struct *si,
 			     unsigned int nr_entries);
 static int __swap_duplicate(swp_entry_t entry, unsigned char usage, int nr);
-static bool swap_entries_put_map(struct swap_info_struct *si,
-				 swp_entry_t entry, int nr);
+static unsigned char swap_put_entry_locked(struct swap_info_struct *si,
+					   struct swap_cluster_info *ci,
+					   swp_entry_t entry,
+					   unsigned char usage);
 static bool folio_swapcache_freeable(struct folio *folio);
 
 static DEFINE_SPINLOCK(swap_lock);
@@ -188,25 +190,6 @@ static bool swap_only_has_cache(struct swap_info_struct *si,
 			return false;
 	} while (++map < map_end);
 
-	return true;
-}
-
-static bool swap_is_last_map(struct swap_info_struct *si,
-		unsigned long offset, int nr_pages, bool *has_cache)
-{
-	unsigned char *map = si->swap_map + offset;
-	unsigned char *map_end = map + nr_pages;
-	unsigned char count = *map;
-
-	if (swap_count(count) != 1)
-		return false;
-
-	while (++map < map_end) {
-		if (*map != count)
-			return false;
-	}
-
-	*has_cache = !!(count & SWAP_HAS_CACHE);
 	return true;
 }
 
@@ -1239,6 +1222,55 @@ start_over:
 	return false;
 }
 
+/*
+ * Put the ref count of entries, caller must ensure the entries'
+ * swap table count are not zero. This won't free up the swap cache.
+ */
+static bool swap_put_entries(struct swap_info_struct *si,
+			     unsigned long start, int nr)
+{
+	unsigned long offset = start, end = start + nr, cluster_end;
+	unsigned long head = SWAP_ENTRY_INVALID;
+	struct swap_cluster_info *ci;
+	bool has_cache = false;
+	int type = si->type;
+	swp_te_t swp_te;
+	unsigned int count;
+next_cluster:
+	ci = swap_lock_cluster(si, offset);
+	cluster_end = min(cluster_offset(si, ci) + SWAPFILE_CLUSTER, end);
+	do {
+		swp_te = __swap_table_get(ci, offset);
+		count = si->swap_map[offset];
+		VM_WARN_ON_ONCE(!swap_count(count));
+		if (swp_te_is_folio(swp_te)) {
+			VM_WARN_ON_ONCE(!(count & SWAP_HAS_CACHE));
+			/* Let the swap cache (folio) handle the final free */
+			has_cache = true;
+		} else if (count == 1) {
+			/* Free up continues last ref entries in batch */
+			head = head ? head : offset;
+			continue;
+		}
+		if (head) {
+			swap_free_entries(si, ci, head, offset - head);
+			head = SWAP_ENTRY_INVALID;
+		}
+		swap_put_entry_locked(si, ci, swp_entry(type, offset), 1);
+	} while (++offset < cluster_end);
+
+	if (head) {
+		swap_free_entries(si, ci, head, offset - head);
+		head = SWAP_ENTRY_INVALID;
+	}
+
+	swap_unlock_cluster(ci);
+	if (cluster_end < end)
+		goto next_cluster;
+
+	return has_cache;
+}
+
 /**
  * folio_alloc_swap - allocate swap space for a folio
  * @folio: folio we want to move to swap
@@ -1349,7 +1381,7 @@ void folio_put_swap(struct folio *folio, struct page *subpage)
 		nr_pages = 1;
 	}
 
-	swap_entries_put_map(swp_info(entry), entry, nr_pages);
+	swap_put_entries(swp_info(entry), swp_offset(entry), nr_pages);
 }
 
 static struct swap_info_struct *_swap_info_get(swp_entry_t entry)
@@ -1386,7 +1418,7 @@ out:
 	return NULL;
 }
 
-static unsigned char swap_entry_put_locked(struct swap_info_struct *si,
+static unsigned char swap_put_entry_locked(struct swap_info_struct *si,
 					   struct swap_cluster_info *ci,
 					   swp_entry_t entry,
 					   unsigned char usage)
@@ -1417,7 +1449,7 @@ static unsigned char swap_entry_put_locked(struct swap_info_struct *si,
 	if (usage)
 		WRITE_ONCE(si->swap_map[offset], usage);
 	else
-		swap_entries_free(si, ci, entry, 1);
+		swap_free_entries(si, ci, offset, 1);
 
 	return usage;
 }
@@ -1488,70 +1520,6 @@ put_out:
 	return NULL;
 }
 
-static bool swap_entries_put_map(struct swap_info_struct *si,
-				 swp_entry_t entry, int nr)
-{
-	unsigned long offset = swp_offset(entry);
-	struct swap_cluster_info *ci;
-	bool has_cache = false;
-	unsigned char count;
-	int i;
-
-	if (nr <= 1)
-		goto fallback;
-	count = swap_count(data_race(si->swap_map[offset]));
-	if (count != 1)
-		goto fallback;
-
-	ci = swap_lock_cluster(si, offset);
-	if (!swap_is_last_map(si, offset, nr, &has_cache)) {
-		goto locked_fallback;
-	}
-	if (!has_cache)
-		swap_entries_free(si, ci, entry, nr);
-	else
-		for (i = 0; i < nr; i++)
-			WRITE_ONCE(si->swap_map[offset + i], SWAP_HAS_CACHE);
-	swap_unlock_cluster(ci);
-
-	return has_cache;
-
-fallback:
-	ci = swap_lock_cluster(si, offset);
-locked_fallback:
-	for (i = 0; i < nr; i++, entry.val++) {
-		count = swap_entry_put_locked(si, ci, entry, 1);
-		if (count == SWAP_HAS_CACHE)
-			has_cache = true;
-	}
-	swap_unlock_cluster(ci);
-	return has_cache;
-}
-
-/*
- * Only functions with "_nr" suffix are able to free entries spanning
- * cross multi clusters, so ensure the range is within a single cluster
- * when freeing entries with functions without "_nr" suffix.
- */
-static bool swap_entries_put_map_nr(struct swap_info_struct *si,
-				    swp_entry_t entry, int nr)
-{
-	int cluster_nr, cluster_rest;
-	unsigned long offset = swp_offset(entry);
-	bool has_cache = false;
-
-	cluster_rest = SWAPFILE_CLUSTER - offset % SWAPFILE_CLUSTER;
-	while (nr) {
-		cluster_nr = min(nr, cluster_rest);
-		has_cache |= swap_entries_put_map(si, entry, cluster_nr);
-		cluster_rest = SWAPFILE_CLUSTER;
-		nr -= cluster_nr;
-		entry.val += cluster_nr;
-	}
-
-	return has_cache;
-}
-
 /*
  * Check if it's the last ref of swap entry in the freeing path.
  */
@@ -1564,11 +1532,11 @@ static inline bool __maybe_unused swap_is_last_ref(unsigned char count)
  * Drop the last ref of swap entries, caller have to ensure all entries
  * belong to the same cgroup and cluster.
  */
-static void swap_entries_free(struct swap_info_struct *si,
+static void swap_free_entries(struct swap_info_struct *si,
 			      struct swap_cluster_info *ci,
-			      swp_entry_t entry, unsigned int nr_pages)
+			      unsigned long offset, unsigned int nr_pages)
 {
-	unsigned long offset = swp_offset(entry);
+	swp_entry_t entry = swp_entry(si->type, offset);
 	unsigned char *map = si->swap_map + offset;
 	unsigned char *map_end = map + nr_pages;
 
@@ -1608,10 +1576,10 @@ void put_swap_folio(struct folio *folio, swp_entry_t entry)
 
 	ci = swap_lock_cluster(si, offset);
 	if (swap_only_has_cache(si, offset, size))
-		swap_entries_free(si, ci, entry, size);
+		swap_free_entries(si, ci, offset, size);
 	else
 		for (int i = 0; i < size; i++, entry.val++)
-			swap_entry_put_locked(si, ci, entry, SWAP_HAS_CACHE);
+			swap_put_entry_locked(si, ci, entry, SWAP_HAS_CACHE);
 	swap_unlock_cluster(ci);
 
 }
@@ -1812,7 +1780,7 @@ void do_put_swap_entries(swp_entry_t entry, int nr)
 	/*
 	 * First free all entries in the range.
 	 */
-	any_only_cache = swap_entries_put_map_nr(si, entry, nr);
+	any_only_cache = swap_put_entries(swp_info(entry), swp_offset(entry), nr);
 
 	/*
 	 * Short-circuit the below loop if none of the entries had their
@@ -1886,7 +1854,7 @@ void free_swap_page_of_entry(swp_entry_t entry)
 	if (!si)
 		return;
 	ci = swap_lock_cluster(si, offset);
-	WARN_ON(swap_entry_put_locked(si, ci, entry, 1));
+	WARN_ON(swap_put_entry_locked(si, ci, entry, 1));
 	swap_unlock_cluster(ci);
 }
 
@@ -3660,7 +3628,7 @@ int __swap_cache_put_map(struct swap_info_struct *si,
 			   struct swap_cluster_info *ci,
 			   unsigned long offset)
 {
-	return swap_entry_put_locked(si, ci,
+	return swap_put_entry_locked(si, ci,
 				     swp_entry(si->type, offset),
 				     SWAP_HAS_CACHE);
 }
@@ -3782,7 +3750,7 @@ outer:
  * into, carry if so, or else fail until a new continuation page is allocated;
  * when the original swap_map count is decremented from 0 with continuation,
  * borrow from the continuation and report whether it still holds more.
- * Called while __swap_duplicate() or caller of swap_entry_put_locked()
+ * Called while __swap_duplicate() or caller of swap_put_entry_locked()
  * holds cluster lock.
  */
 static bool swap_count_continued(struct swap_info_struct *si,
