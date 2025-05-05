@@ -140,13 +140,6 @@ static inline void swap_unlock_cluster_irq(struct swap_cluster_info *ci)
 	spin_unlock_irq(&ci->lock);
 }
 
-extern int __swap_cache_set_map(struct swap_info_struct *si,
-				struct swap_cluster_info *ci,
-				unsigned long offset);
-extern int __swap_cache_put_map(struct swap_info_struct *si,
-				struct swap_cluster_info *ci,
-				unsigned long offset);
-
 /*
  * All swap entries starts getting allocated by folio_alloc_swap(),
  * and the folio will be added to swap cache.
@@ -160,6 +153,11 @@ extern int __swap_cache_put_map(struct swap_info_struct *si,
 int folio_alloc_swap(struct folio *folio, gfp_t gfp_mask);
 int folio_dup_swap(struct folio *folio, struct page *subpage);
 void folio_put_swap(struct folio *folio, struct page *subpage);
+
+/* For internal use */
+extern void swap_free_entries(struct swap_info_struct *si,
+			      struct swap_cluster_info *ci,
+			      unsigned long offset, unsigned int nr_pages);
 
 /* linux/mm/page_io.c */
 int sio_pool_init(void);

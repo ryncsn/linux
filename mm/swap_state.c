@@ -143,12 +143,7 @@ again:
 			existing = swp_te_folio(exist);
 			goto out_failed;
 		}
-		/*
-		 * XXX: Below may cause OOM due to race with swapout where there
-		 * is a tiny time window that HAS_CACHE is set but folio is not
-		 * in the cache, will be fixed once the HAS_CACHE flag is gone.
-		 */
-		if (swapin && __swap_cache_set_map(si, ci, offset))
+		if (swapin && !__swap_count(swp_entry(si->type, offset)))
 			goto out_failed;
 		if (shadow && swp_te_is_shadow(exist))
 			*shadow = swp_te_shadow(exist);
@@ -170,10 +165,8 @@ out_failed:
 	 * We may lose shadow due to raced swapin, which should be
 	 * fine, caller better keep the previous returned shadow.
 	 */
-	while (offset-- > start) {
+	while (offset-- > start)
 		__swap_table_set_null(ci, offset);
-		__swap_cache_put_map(si, ci, offset);
-	}
 	swap_unlock_cluster(ci);
 
 	/*
@@ -206,6 +199,7 @@ void __swap_cache_del_folio(swp_entry_t entry,
 	pgoff_t offset, start, end;
 	struct swap_info_struct *si;
 	struct swap_cluster_info *ci;
+	bool folio_swapped = false, need_free = false;
 	unsigned long nr_pages = folio_nr_pages(folio);
 
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
@@ -225,12 +219,26 @@ void __swap_cache_del_folio(swp_entry_t entry,
 			__swap_table_set_null_shadow(ci, offset);
 		else
 			__swap_table_set_shadow(ci, offset, shadow);
+		if (__swap_count(swp_entry(si->type, offset)))
+			folio_swapped = true;
+		else
+			need_free = true;
 	} while (++offset < end);
 
 	folio->swap.val = 0;
 	folio_clear_swapcache(folio);
 	node_stat_mod_folio(folio, NR_FILE_PAGES, -nr_pages);
 	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr_pages);
+
+	if (!folio_swapped) {
+		swap_free_entries(si, ci, start, nr_pages);
+	} else if (need_free) {
+		offset = start;
+		do {
+			if (!__swap_count(swp_entry(si->type, offset)))
+				swap_free_entries(si, ci, offset, 1);
+		} while (++offset < end);
+	}
 }
 
 void delete_from_swap_cache(struct folio *folio)
@@ -242,7 +250,6 @@ void delete_from_swap_cache(struct folio *folio)
 	__swap_cache_del_folio(entry, folio, NULL);
 	swap_unlock_cluster(ci);
 
-	put_swap_folio(folio, entry);
 	folio_ref_sub(folio, folio_nr_pages(folio));
 }
 

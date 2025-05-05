@@ -793,7 +793,6 @@ static int __remove_mapping(struct address_space *mapping, struct folio *folio,
 		__swap_cache_del_folio(swap, folio, shadow);
 		memcg1_swapout(folio, swap);
 		swap_unlock_cluster_irq(ci);
-		put_swap_folio(folio, swap);
 	} else {
 		void (*free_folio)(struct folio *);
 
