@@ -4319,12 +4319,6 @@ static inline int non_swapcache_batch(swp_entry_t entry, int max_nr)
 	pgoff_t offset = swp_offset(entry);
 	int i;
 
-	/*
-	 * While allocating a large folio and doing swap_read_folio, which is
-	 * the case the being faulted pte doesn't have swapcache. We need to
-	 * ensure all PTEs have no cache as well, otherwise, we might go to
-	 * swap devices while the content is in swapcache.
-	 */
 	for (i = 0; i < max_nr; i++) {
 		if ((si->swap_map[offset + i] & SWAP_HAS_CACHE))
 			return i;
@@ -4334,34 +4328,30 @@ static inline int non_swapcache_batch(swp_entry_t entry, int max_nr)
 }
 
 /*
- * Check if the PTEs within a range are contiguous swap entries
- * and have consistent swapcache, zeromap.
+ * Check if the page table is still suitable for large folio swap in.
+ * @vmf: The fault triggering the swap-in.
+ * @ptep: Pointer to the PTE that should be the head of the swap in folio.
+ * @addr: The address corresponding to the PTE.
+ * @nr_pages: Number of pages of the folio that suppose to be swapped in.
  */
-static bool can_swapin_thp(struct vm_fault *vmf, pte_t *ptep, int nr_pages)
+static bool can_swapin_thp(struct vm_fault *vmf, pte_t *ptep,
+			   unsigned long addr, unsigned int nr_pages)
 {
-	unsigned long addr;
-	swp_entry_t entry;
-	int idx;
-	pte_t pte;
+	pte_t pte = ptep_get(ptep);
+	unsigned long addr_end = addr + (PAGE_SIZE * nr_pages);
+	unsigned long pte_offset = (vmf->address - addr) / PAGE_SIZE;
 
-	addr = ALIGN_DOWN(vmf->address, nr_pages * PAGE_SIZE);
-	idx = (vmf->address - addr) / PAGE_SIZE;
-	pte = ptep_get(ptep);
-
-	if (!pte_same(pte, pte_move_swp_offset(vmf->orig_pte, -idx)))
+	VM_WARN_ON_ONCE(!IS_ALIGNED(addr, PAGE_SIZE) ||
+			addr > vmf->address || addr_end <= vmf->address);
+	if (unlikely(addr < max(addr & PMD_MASK, vmf->vma->vm_start) ||
+		     addr_end > pmd_addr_end(addr, vmf->vma->vm_end)))
 		return false;
-	entry = pte_to_swp_entry(pte);
-	if (swap_pte_batch(ptep, nr_pages, pte) != nr_pages)
-		return false;
-
 	/*
-	 * swap_read_folio() can't handle the case a large folio is hybridly
-	 * from different backends. And they are likely corner cases. Similar
-	 * things might be added once zswap support large folios.
+	 * All swap entries must from the same swap device, in same
+	 * cgroup, with same exclusiveness, only differs in offset.
 	 */
-	if (unlikely(swap_zeromap_batch(entry, nr_pages, NULL) != nr_pages))
-		return false;
-	if (unlikely(non_swapcache_batch(entry, nr_pages) != nr_pages))
+	if (!pte_same(pte, pte_move_swp_offset(vmf->orig_pte, -pte_offset)) ||
+	    swap_pte_batch(ptep, nr_pages, pte) != nr_pages)
 		return false;
 
 	return true;
@@ -4441,13 +4431,24 @@ static struct folio *alloc_swap_folio(struct vm_fault *vmf)
 	 * completely swap entries with contiguous swap offsets.
 	 */
 	order = highest_order(orders);
-	while (orders) {
-		addr = ALIGN_DOWN(vmf->address, PAGE_SIZE << order);
-		if (can_swapin_thp(vmf, pte + pte_index(addr), 1 << order))
-			break;
-		order = next_order(&orders, order);
+	for (; orders; order = next_order(&orders, order)) {
+		unsigned long nr_pages = 1 << order;
+		swp_entry_t swap_entry = { .val = ALIGN_DOWN(entry.val, nr_pages) };
+		addr = ALIGN_DOWN(vmf->address, nr_pages * PAGE_SIZE);
+		if (!can_swapin_thp(vmf, pte + pte_index(addr), addr, nr_pages))
+			continue;
+		/*
+		 * If there is already a smaller folio in cache, it will
+		 * conflict with the larger folio in the swap cache layer
+		 * and block the swap in.
+		 */
+		if (unlikely(non_swapcache_batch(swap_entry, nr_pages) != nr_pages))
+			continue;
+		/* Zero map doesn't work with large folio yet. */
+		if (unlikely(swap_zeromap_batch(swap_entry, nr_pages, NULL) != nr_pages))
+			continue;
+		break;
 	}
-
 	pte_unmap_unlock(pte, ptl);
 
 	/* Try allocating the highest of the remaining orders. */
@@ -4731,27 +4732,18 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	page_idx = 0;
 	address = vmf->address;
 	ptep = vmf->pte;
+
 	if (folio_test_large(folio) && folio_test_swapcache(folio)) {
-		int nr = folio_nr_pages(folio);
+		unsigned long nr = folio_nr_pages(folio);
 		unsigned long idx = folio_page_idx(folio, page);
-		unsigned long folio_start = address - idx * PAGE_SIZE;
-		unsigned long folio_end = folio_start + nr * PAGE_SIZE;
-		pte_t *folio_ptep;
-		pte_t folio_pte;
+		unsigned long folio_address = address - idx * PAGE_SIZE;
+		pte_t *folio_ptep = vmf->pte - idx;
 
-		if (unlikely(folio_start < max(address & PMD_MASK, vma->vm_start)))
-			goto check_folio;
-		if (unlikely(folio_end > pmd_addr_end(address, vma->vm_end)))
-			goto check_folio;
-
-		folio_ptep = vmf->pte - idx;
-		folio_pte = ptep_get(folio_ptep);
-		if (!pte_same(folio_pte, pte_move_swp_offset(vmf->orig_pte, -idx)) ||
-		    swap_pte_batch(folio_ptep, nr, folio_pte) != nr)
+		if (!can_swapin_thp(vmf, folio_ptep, folio_address, nr))
 			goto check_folio;
 
 		page_idx = idx;
-		address = folio_start;
+		address = folio_address;
 		ptep = folio_ptep;
 		nr_pages = nr;
 		entry = folio->swap;
