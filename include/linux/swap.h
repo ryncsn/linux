@@ -467,7 +467,7 @@ sector_t swap_folio_sector(struct folio *folio);
 /*
  * Below two helpers are for manipulating allocated swap entries
  * from page table or mapping (shmem) directly. Caller must ensure
- * the entries won't be concurrently freed completely by others.
+ * the entry won't be freed completely (swap count == 0) by others.
  *
  * All entries must be allocated by folio_alloc_swap(), see
  * mm/swap.h for more comments on it.
