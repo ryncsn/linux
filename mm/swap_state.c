@@ -170,7 +170,8 @@ void __delete_from_swap_cache(struct folio *folio,
  * Lookup a swap entry in the swap cache. A found folio will be returned
  * unlocked and with its refcount incremented.
  *
- * Caller must hold a reference on the swap device.
+ * Caller must hold a reference of the swap device, and check if the
+ * returned folio is still valid after locking it (e.g. folio_swap_contains).
  */
 struct folio *swap_cache_get_folio(swp_entry_t entry)
 {
@@ -339,7 +340,10 @@ struct folio *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 	for (;;) {
 		int err;
 
-		/* Check the swap cache in case the folio is already there */
+		/*
+		 * Check the swap cache first, if a cached folio is found,
+		 * return it unlocked. The caller will lock and check it.
+		 */
 		folio = swap_cache_get_folio(entry);
 		if (folio)
 			goto got_folio;

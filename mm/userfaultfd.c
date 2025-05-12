@@ -1409,6 +1409,10 @@ retry:
 				goto retry;
 			}
 		}
+		if (!folio_swap_contains(src_folio, entry)) {
+			err = -EBUSY;
+			goto out;
+		}
 		err = move_swap_pte(mm, dst_vma, dst_addr, src_addr, dst_pte, src_pte,
 				orig_dst_pte, orig_src_pte, dst_pmd, dst_pmdval,
 				dst_ptl, src_ptl, src_folio);
