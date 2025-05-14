@@ -2123,7 +2123,7 @@ static void shmem_set_folio_swapin_error(struct inode *inode, pgoff_t index,
 	nr_pages = folio_nr_pages(folio);
 	folio_wait_writeback(folio);
 	folio_put_swap(folio, NULL);
-	delete_from_swap_cache(folio);
+	folio_free_swap_cache(folio);
 	/*
 	 * Don't treat swapin error folio as alloced. Otherwise inode->i_blocks
 	 * won't be 0 when inode is released and thus trigger WARN_ON(i_blocks)
@@ -2365,7 +2365,7 @@ alloced:
 		folio_mark_accessed(folio);
 
 	folio_put_swap(folio, NULL);
-	delete_from_swap_cache(folio);
+	folio_free_swap_cache(folio);
 	folio_mark_dirty(folio);
 	put_swap_device(si);
 

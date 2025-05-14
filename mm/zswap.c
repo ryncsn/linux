@@ -1141,7 +1141,7 @@ static int zswap_writeback_entry(struct zswap_entry *entry,
 
 out:
 	if (ret && ret != -EEXIST) {
-		delete_from_swap_cache(folio);
+		folio_free_swap_cache(folio);
 		folio_unlock(folio);
 	}
 	folio_put(folio);

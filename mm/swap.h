@@ -151,10 +151,15 @@ extern void __swap_cache_put_entries(struct swap_info_struct *si,
  *
  * Swap in maps a folio in swap cache and decrease the swap table entry
  * count with folio_put_swap.
+ *
+ * Swap uses lazy free, so a folio may stay in swap cache for a long time
+ * and pin the swap entry. folio_free_swap_cache and folio_free_swap can
+ * be used to reclaim the swap cache.
  */
 int folio_alloc_swap(struct folio *folio, gfp_t gfp_mask);
 int folio_dup_swap(struct folio *folio, struct page *subpage);
 void folio_put_swap(struct folio *folio, struct page *subpage);
+void folio_free_swap_cache(struct folio *folio);
 
 /* linux/mm/page_io.c */
 int sio_pool_init(void);
@@ -226,7 +231,6 @@ static inline bool folio_swap_contains(struct folio *folio, swp_entry_t entry)
 }
 
 void show_swap_cache_info(void);
-void delete_from_swap_cache(struct folio *folio);
 void swapcache_clear(struct swap_info_struct *si, swp_entry_t entry, int nr);
 struct folio *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		struct vm_area_struct *vma, unsigned long addr,
@@ -297,6 +301,10 @@ static inline int folio_dup_swap(struct folio *folio, struct page *page)
 }
 
 static inline void folio_put_swap(struct folio *folio, struct page *page)
+{
+}
+
+static inline void folio_free_swap_cache(struct folio *folio)
 {
 }
 
@@ -385,10 +393,6 @@ static inline void __swap_cache_override_folio(
 static inline void *swap_cache_get_shadow(swp_entry_t end)
 {
 	return NULL;
-}
-
-static inline void delete_from_swap_cache(struct folio *folio)
-{
 }
 
 static inline unsigned int folio_swap_flags(struct folio *folio)

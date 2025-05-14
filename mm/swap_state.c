@@ -216,18 +216,6 @@ void __swap_cache_del_folio(swp_entry_t entry,
 	__swap_cache_put_entries(si, ci, entry, nr_pages);
 }
 
-void delete_from_swap_cache(struct folio *folio)
-{
-	struct swap_cluster_info *ci;
-	swp_entry_t entry = folio->swap;
-
-	ci = swap_lock_cluster(swp_info(entry), swp_offset(entry));
-	__swap_cache_del_folio(entry, folio, NULL);
-	swap_unlock_cluster(ci);
-
-	folio_ref_sub(folio, folio_nr_pages(folio));
-}
-
 /*
  * Caller must hold a reference on the swap device, and check if the
  * returned folio is still valid after locking it (e.g. folio_swap_contains).

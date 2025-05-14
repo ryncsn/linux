@@ -4727,7 +4727,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 		 */
 		if (!folio_test_anon(folio)) {
 			WARN_ON_ONCE(folio_test_dirty(folio));
-			delete_from_swap_cache(folio);
+			folio_free_swap_cache(folio);
 			goto out_nomap;
 		}
 	}

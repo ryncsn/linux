@@ -273,7 +273,7 @@ again:
 	if (!need_reclaim)
 		goto out_unlock;
 
-	delete_from_swap_cache(folio);
+	folio_free_swap_cache(folio);
 	folio_set_dirty(folio);
 	ret = nr_pages;
 out_unlock:
@@ -1354,6 +1354,25 @@ void folio_put_swap(struct folio *folio, struct page *subpage)
 	swap_entries_put_map(swp_info(entry), entry, nr_pages);
 }
 
+/*
+ * folio_free_swap_cache() - Remove the folio from swap cache, and free
+ * all entires with zero count.
+ *
+ * NOTE: if the folio is dirty and any of its swap entries' count is not
+ * zero, freeing the swap cache without write back may cause data loss.
+ */
+void folio_free_swap_cache(struct folio *folio)
+{
+	struct swap_cluster_info *ci;
+	swp_entry_t entry = folio->swap;
+
+	ci = swap_lock_cluster(swp_info(entry), swp_offset(entry));
+	__swap_cache_del_folio(entry, folio, NULL);
+	swap_unlock_cluster(ci);
+
+	folio_ref_sub(folio, folio_nr_pages(folio));
+}
+
 static struct swap_info_struct *_swap_info_get(swp_entry_t entry)
 {
 	struct swap_info_struct *si;
@@ -1787,7 +1806,7 @@ bool folio_free_swap(struct folio *folio)
 	if (folio_swapped(folio))
 		return false;
 
-	delete_from_swap_cache(folio);
+	folio_free_swap_cache(folio);
 	folio_set_dirty(folio);
 	return true;
 }
