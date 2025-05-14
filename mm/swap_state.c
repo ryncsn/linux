@@ -169,7 +169,7 @@ again:
 			existing = swp_te_folio(exist);
 			goto out_failed;
 		}
-		if (__swap_cache_set_entry(si, ci, offset))
+		if (!__swap_count(swp_entry(si->type, offset)))
 			goto out_failed;
 		if (shadow && swp_te_is_shadow(exist))
 			*shadow = swp_te_shadow(exist);
@@ -191,10 +191,8 @@ out_failed:
 	 * We may lose shadow here due to raced swapin, which is rare and OK,
 	 * caller better keep the previous returned shadow.
 	 */
-	while (offset-- > start) {
+	while (offset-- > start)
 		__swap_table_set_shadow(ci, offset, NULL);
-		__swap_cache_put_entries(si, ci, swp_entry(si->type, offset), 1);
-	}
 	swap_unlock_cluster(ci);
 
 	/*
@@ -219,6 +217,7 @@ void __swap_cache_del_folio(swp_entry_t entry,
 	pgoff_t offset, start, end;
 	struct swap_info_struct *si;
 	struct swap_cluster_info *ci;
+	bool folio_swapped = false, need_free = false;
 	unsigned long nr_pages = folio_nr_pages(folio);
 
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
@@ -235,13 +234,26 @@ void __swap_cache_del_folio(swp_entry_t entry,
 		exist = __swap_table_get(ci, offset);
 		VM_WARN_ON_ONCE(swp_te_folio(exist) != folio);
 		__swap_table_set_shadow(ci, offset, shadow);
+		if (__swap_count(swp_entry(si->type, offset)))
+			folio_swapped = true;
+		else
+			need_free = true;
 	} while (++offset < end);
 
 	folio->swap.val = 0;
 	folio_clear_swapcache(folio);
 	node_stat_mod_folio(folio, NR_FILE_PAGES, -nr_pages);
 	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr_pages);
-	__swap_cache_put_entries(si, ci, entry, nr_pages);
+
+	if (!folio_swapped) {
+		__swap_free_entries(si, ci, start, nr_pages);
+	} else if (need_free) {
+		offset = start;
+		do {
+			if (!__swap_count(swp_entry(si->type, offset)))
+				__swap_free_entries(si, ci, offset, 1);
+		} while (++offset < end);
+	}
 }
 
 /*
