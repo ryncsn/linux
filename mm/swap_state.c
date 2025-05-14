@@ -169,7 +169,7 @@ again:
 			existing = swp_te_folio(exist);
 			goto out_failed;
 		}
-		if (!__swap_count(swp_entry(si->type, offset)))
+		if (!swp_te_get_count(exist))
 			goto out_failed;
 		if (shadow && swp_te_is_shadow(exist))
 			*shadow = swp_te_shadow(exist);
@@ -234,7 +234,7 @@ void __swap_cache_del_folio(swp_entry_t entry,
 		exist = __swap_table_get(ci, offset);
 		VM_WARN_ON_ONCE(swp_te_folio(exist) != folio);
 		__swap_table_set_shadow(ci, offset, shadow);
-		if (__swap_count(swp_entry(si->type, offset)))
+		if (swp_te_get_count(exist))
 			folio_swapped = true;
 		else
 			need_free = true;
@@ -250,7 +250,7 @@ void __swap_cache_del_folio(swp_entry_t entry,
 	} else if (need_free) {
 		offset = start;
 		do {
-			if (!__swap_count(swp_entry(si->type, offset)))
+			if (!swp_te_get_count(__swap_table_get(ci, offset)))
 				__swap_free_entries(si, ci, offset, 1);
 		} while (++offset < end);
 	}
@@ -268,19 +268,6 @@ void *swap_cache_get_shadow(swp_entry_t entry)
 	swp_te = __swap_table_get(swp_cluster(entry), offset);
 
 	return swp_te_is_shadow(swp_te) ? swp_te_shadow(swp_te) : NULL;
-}
-
-void __swap_cache_clear_shadow(swp_entry_t entry, int nr_ents)
-{
-	struct swap_cluster_info *ci;
-	pgoff_t offset = swp_offset(entry), end;
-
-	ci = swp_offset_cluster(swp_info(entry), offset);
-	end = offset + nr_ents;
-	do {
-		WARN_ON_ONCE(swp_te_is_folio(__swap_table_get(ci, offset)));
-		__swap_table_set_null(ci, offset);
-	} while (++offset < end);
 }
 
 /*

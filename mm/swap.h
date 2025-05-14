@@ -39,6 +39,7 @@ struct swap_cluster_info {
 	u8 flags;
 	u8 order;
 	swp_te_t *table;
+	unsigned long *extend_table; /* Only used for extended swap count */
 	struct list_head list;
 };
 
@@ -135,6 +136,8 @@ static inline void swap_unlock_cluster_irq(struct swap_cluster_info *ci)
 	spin_unlock_irq(&ci->lock);
 }
 
+extern int swap_retry_table_alloc(swp_entry_t entry, gfp_t gfp);
+
 /*
  * All swap entries starts getting allocated by folio_alloc_swap(),
  * and the folio will be added to swap cache.
@@ -198,7 +201,6 @@ extern int __swap_cache_replace_folio(struct swap_cluster_info *ci,
 extern void __swap_cache_override_folio(struct swap_cluster_info *ci,
 					swp_entry_t entry, struct folio *old,
 					struct folio *new);
-extern void __swap_cache_clear_shadow(swp_entry_t entry, int nr_ents);
 
 /*
  * Return the swap device position of the swap entry.
@@ -362,6 +364,11 @@ static inline void swap_update_readahead(struct folio *folio,
 static inline int swap_writepage(struct page *p, struct writeback_control *wbc)
 {
 	return 0;
+}
+
+static inline int swap_retry_table_alloc(swp_entry_t entry, gfp_t gfp)
+{
+	return -EINVAL;
 }
 
 static inline struct folio *swap_cache_get_folio(swp_entry_t entry)
