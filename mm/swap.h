@@ -185,7 +185,10 @@ static inline struct address_space *swap_address_space(swp_entry_t entry)
 /* Below helpers requires the caller to pin the swap device. */
 extern struct folio *swap_cache_get_folio(swp_entry_t entry);
 extern struct folio *swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
-					  void **shadow, bool swapin);
+					  void **shadow);
+extern void __swap_cache_add_folio(swp_entry_t entry,
+				   struct swap_cluster_info *ci,
+				   struct folio *folio);
 extern bool swap_cache_check_folio(swp_entry_t entry);
 extern void *swap_cache_get_shadow(swp_entry_t entry);
 /* Below helpers requires the caller to lock the swap cluster. */
@@ -368,8 +371,7 @@ static inline struct folio *swap_cache_get_folio(swp_entry_t entry)
 	return NULL;
 }
 
-static inline int swap_cache_add_folio(swp_entry_t end, struct folio *folio,
-				       void **shadow, bool swapin)
+static inline int swap_cache_add_folio(swp_entry_t end, struct folio *folio, void **shadow)
 {
 	return -EINVAL;
 }

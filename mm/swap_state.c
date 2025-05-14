@@ -110,12 +110,39 @@ int __swap_cache_replace_folio(struct swap_cluster_info *ci, swp_entry_t entry,
 	return 0;
 }
 
-/*
- * Return the folio being added on success, or return the existing folio
- * with conflicting index on failure.
- */
+/* For swap allocator's initial allocation of entries to a folio */
+void __swap_cache_add_folio(swp_entry_t entry, struct swap_cluster_info *ci,
+			    struct folio *folio)
+{
+	pgoff_t offset = swp_offset(entry), end;
+	unsigned long nr_pages = folio_nr_pages(folio);
+
+	/*
+	 * Allocator should always allocate aligned entries so folio based
+	 * operations never crossed more than one cluster.
+	 */
+	VM_WARN_ON_ONCE_FOLIO(!IS_ALIGNED(offset, nr_pages), folio);
+	VM_WARN_ON_ONCE_FOLIO(!folio_test_locked(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(folio_test_swapcache(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(!folio_test_uptodate(folio), folio);
+
+	end = offset + nr_pages;
+	do {
+		WARN_ON_ONCE(!swp_te_is_null(__swap_table_get(ci, offset)));
+		__swap_table_set_folio(ci, offset, folio);
+	} while (++offset < end);
+
+	folio_ref_add(folio, nr_pages);
+	folio_set_swapcache(folio);
+	folio->swap = entry;
+
+	node_stat_mod_folio(folio, NR_FILE_PAGES, nr_pages);
+	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, nr_pages);
+}
+
+/* For swap in or perform IO for an allocated swap entry. */
 struct folio *swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
-				   void **shadow, bool swapin)
+				   void **shadow)
 {
 	swp_te_t exist;
 	pgoff_t end, start, offset;
@@ -127,9 +154,10 @@ struct folio *swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
 	start = swp_offset(entry);
 	end = start + nr_pages;
 
-	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
-	VM_BUG_ON_FOLIO(folio_test_swapcache(folio), folio);
-	VM_BUG_ON_FOLIO(!folio_test_swapbacked(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(!folio_test_locked(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(folio_test_swapcache(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(!folio_test_swapbacked(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(!IS_ALIGNED(start, nr_pages), folio);
 again:
 	offset = start;
 	existing = NULL;
@@ -141,7 +169,7 @@ again:
 			existing = swp_te_folio(exist);
 			goto out_failed;
 		}
-		if (swapin && __swap_cache_set_entry(si, ci, offset))
+		if (__swap_cache_set_entry(si, ci, offset))
 			goto out_failed;
 		if (shadow && swp_te_is_shadow(exist))
 			*shadow = swp_te_shadow(exist);
@@ -381,7 +409,7 @@ static struct folio *__swapin_cache_add_prepare(swp_entry_t entry,
 
 	__folio_set_locked(folio);
 	__folio_set_swapbacked(folio);
-	swapcache = swap_cache_add_folio(entry, folio, &shadow, true);
+	swapcache = swap_cache_add_folio(entry, folio, &shadow);
 	if (swapcache != folio) {
 		folio_unlock(folio);
 		return swapcache;
