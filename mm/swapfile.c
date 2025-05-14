@@ -1283,7 +1283,7 @@ int folio_alloc_swap(struct folio *folio, gfp_t gfp)
 	if (!entry.val)
 		return -ENOMEM;
 
-	if (swap_cache_add_folio(entry, folio, NULL))
+	if (WARN_ON(swap_cache_add_folio(entry, folio, NULL, false) != folio))
 		goto out_free;
 
 	atomic_long_sub(size, &nr_swap_pages);
@@ -1556,6 +1556,17 @@ void swap_free_nr(swp_entry_t entry, int nr_pages)
 	}
 }
 
+void __swap_cache_put_entries(struct swap_info_struct *si,
+			      struct swap_cluster_info *ci,
+			      swp_entry_t entry, unsigned int size)
+{
+	if (swap_only_has_cache(si, swp_offset(entry), size))
+		swap_entries_free(si, ci, entry, size);
+	else
+		for (int i = 0; i < size; i++, entry.val++)
+			swap_entry_put_locked(si, ci, entry, SWAP_HAS_CACHE);
+}
+
 /*
  * Called after dropping swapcache to decrease refcnt to swap entries.
  */
@@ -1571,11 +1582,7 @@ void put_swap_folio(struct folio *folio, swp_entry_t entry)
 		return;
 
 	ci = swap_lock_cluster(si, offset);
-	if (swap_only_has_cache(si, offset, size))
-		swap_entries_free(si, ci, entry, size);
-	else
-		for (int i = 0; i < size; i++, entry.val++)
-			swap_entry_put_locked(si, ci, entry, SWAP_HAS_CACHE);
+	__swap_cache_put_entries(si, ci, entry, size);
 	swap_unlock_cluster(ci);
 }
 
@@ -3597,17 +3604,10 @@ int swap_duplicate_nr(swp_entry_t entry, int nr)
 	return err;
 }
 
-/*
- * @entry: first swap entry from which we allocate nr swap cache.
- *
- * Called when allocating swap cache for existing swap entries,
- * This can return error codes. Returns 0 at success.
- * -EEXIST means there is a swap cache.
- * Note: return code is different from swap_duplicate().
- */
-int swapcache_prepare(swp_entry_t entry, int nr)
+int __swap_cache_set_entry(struct swap_info_struct *si,
+			   struct swap_cluster_info *ci, unsigned long offset)
 {
-	return __swap_duplicate(entry, SWAP_HAS_CACHE, nr);
+	return swap_dup_entries(si, ci, offset, SWAP_HAS_CACHE, 1);
 }
 
 /*
