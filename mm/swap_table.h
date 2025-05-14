@@ -2,6 +2,7 @@
 #ifndef _MM_SWAP_TABLE_H
 #define _MM_SWAP_TABLE_H
 
+#include <linux/rcupdate.h>
 #include "swap.h"
 
 /*
@@ -161,13 +162,31 @@ static inline void __swap_table_set(struct swap_cluster_info *ci, pgoff_t off,
 				    swp_te_t swp_te)
 {
 	atomic_long_set(&ci->table[off % SWAPFILE_CLUSTER], swp_te.counter);
+	lockdep_assert_held(&ci->lock);
+	swp_te_t *table = rcu_dereference_protected(ci->table, true);
+	atomic_long_set(&table[off % SWAPFILE_CLUSTER], swp_te.counter);
+}
+
+static inline swp_te_t swap_table_try_get(struct swap_cluster_info *ci, pgoff_t off)
+{
+	swp_te_t swp_te;
+	rcu_read_lock();
+	swp_te_t *table = rcu_dereference_check(ci->table,
+						lockdep_is_held(&ci->lock));
+	if (table)
+		swp_te.counter = atomic_long_read(&table[off % SWAPFILE_CLUSTER]);
+	else
+		swp_te = null_swp_te();
+	rcu_read_unlock();
+	return swp_te;
 }
 
 static inline swp_te_t __swap_table_get(struct swap_cluster_info *ci, pgoff_t off)
 {
-	swp_te_t swp_te = {
-		.counter = atomic_long_read(&ci->table[off % SWAPFILE_CLUSTER])
-	};
+	swp_te_t swp_te;
+	swp_te_t *table = rcu_dereference_check(ci->table,
+						lockdep_is_held(&ci->lock));
+	swp_te.counter = atomic_long_read(&table[off % SWAPFILE_CLUSTER]);
 	return swp_te;
 }
 

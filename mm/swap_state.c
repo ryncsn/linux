@@ -163,6 +163,8 @@ again:
 	existing = NULL;
 	si = swp_info(entry);
 	ci = swap_lock_cluster(si, offset);
+	if (!ci->table)
+		goto out_failed;
 	do {
 		exist = __swap_table_get(ci, offset);
 		if (unlikely(swp_te_is_folio(exist))) {
@@ -263,10 +265,8 @@ void __swap_cache_del_folio(swp_entry_t entry,
 void *swap_cache_get_shadow(swp_entry_t entry)
 {
 	swp_te_t swp_te;
-
 	pgoff_t offset = swp_offset(entry);
-	swp_te = __swap_table_get(swp_cluster(entry), offset);
-
+	swp_te = swap_table_try_get(swp_cluster(entry), offset);
 	return swp_te_is_shadow(swp_te) ? swp_te_shadow(swp_te) : NULL;
 }
 
@@ -281,8 +281,7 @@ struct folio *swap_cache_get_folio(swp_entry_t entry)
 {
 	swp_te_t swp_te;
 	struct folio *folio;
-	swp_te = __swap_table_get(swp_cluster(entry), swp_offset(entry));
-
+	swp_te = swap_table_try_get(swp_cluster(entry), swp_offset(entry));
 	if (!swp_te_is_folio(swp_te))
 		return NULL;
 
@@ -300,7 +299,7 @@ struct folio *swap_cache_get_folio(swp_entry_t entry)
 bool swap_cache_check_folio(swp_entry_t entry)
 {
 	swp_te_t swp_te;
-	swp_te = __swap_table_get(swp_cluster(entry), swp_offset(entry));
+	swp_te = swap_table_try_get(swp_cluster(entry), swp_offset(entry));
 	return swp_te_is_folio(swp_te);
 }
 

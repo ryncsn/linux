@@ -24,6 +24,12 @@ extern struct swap_info_struct *swap_info[];
  */
 typedef atomic_long_t swp_te_t;
 
+/* A typical flat array as swap table */
+struct swap_table_flat {
+	swp_te_t entries[SWAPFILE_CLUSTER];
+	struct rcu_head rcu;
+};
+
 /*
  * We use this to track usage of a cluster. A cluster is a block of swap disk
  * space with SWAPFILE_CLUSTER pages long and naturally aligns in disk. All
@@ -38,7 +44,7 @@ struct swap_cluster_info {
 	u16 count;
 	u8 flags;
 	u8 order;
-	swp_te_t *table;
+	swp_te_t __rcu *table;
 	unsigned long *extend_table; /* Only used for extended swap count */
 	struct list_head list;
 };
