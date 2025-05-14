@@ -181,15 +181,19 @@ static long swap_usage_in_pages(struct swap_info_struct *si)
 #define TTRS_FULL		0x4
 
 static bool swap_only_has_cache(struct swap_info_struct *si,
-			      unsigned long offset, int nr_pages)
+				struct swap_cluster_info *ci,
+				unsigned long offset, int nr_pages)
 {
 	unsigned char *map = si->swap_map + offset;
 	unsigned char *map_end = map + nr_pages;
+	swp_te_t entry;
 
 	do {
+		entry = __swap_table_get(ci, offset);
 		VM_BUG_ON(!(*map & SWAP_HAS_CACHE));
-		if (*map != SWAP_HAS_CACHE)
+		if (*map)
 			return false;
+		offset++;
 	} while (++map < map_end);
 
 	return true;
@@ -247,11 +251,11 @@ again:
 
 	/*
 	 * It's safe to delete the folio from swap cache only if the folio's
-	 * swap_map is HAS_CACHE only, which means the slots have no page table
+	 * entry is swap cache only, which means the slots have no page table
 	 * reference or pending writeback, and can't be allocated to others.
 	 */
 	ci = swap_lock_cluster(si, offset);
-	need_reclaim = swap_only_has_cache(si, offset, nr_pages);
+	need_reclaim = swap_only_has_cache(si, ci, offset, nr_pages);
 	swap_unlock_cluster(ci);
 	if (!need_reclaim)
 		goto out_unlock;
@@ -660,29 +664,21 @@ static bool cluster_reclaim_range(struct swap_info_struct *si,
 
 	spin_unlock(&ci->lock);
 	do {
-		switch (READ_ONCE(map[offset])) {
-		case 0:
-			offset++;
+		if (swap_count(READ_ONCE(map[offset])))
 			break;
-		case SWAP_HAS_CACHE:
-			nr_reclaim = __try_to_reclaim_swap(si, offset, TTRS_ANYWAY);
-			if (nr_reclaim > 0)
-				offset += nr_reclaim;
-			else
-				goto out;
+		nr_reclaim = __try_to_reclaim_swap(si, offset, TTRS_ANYWAY);
+		if (nr_reclaim > 0)
+			offset += nr_reclaim;
+		else if (nr_reclaim < 1)
 			break;
-		default:
-			goto out;
-		}
-	} while (offset < end);
-out:
+	} while (++offset < end);
 	spin_lock(&ci->lock);
 	/*
 	 * Recheck the range no matter reclaim succeeded or not, the slot
 	 * could have been be freed while we are not holding the lock.
 	 */
 	for (offset = start; offset < end; offset++)
-		if (READ_ONCE(map[offset]))
+		if (map[offset] || !swp_te_is_null(__swap_table_get(ci, offset)))
 			return false;
 
 	return true;
@@ -700,16 +696,13 @@ static bool cluster_scan_range(struct swap_info_struct *si,
 		return true;
 
 	for (offset = start; offset < end; offset++) {
-		switch (READ_ONCE(map[offset])) {
-		case 0:
-			continue;
-		case SWAP_HAS_CACHE:
+		if (swap_count(map[offset]))
+			return false;
+		if (swp_te_is_folio(__swap_table_get(ci, offset))) {
+			VM_WARN_ON_ONCE(!(map[offset] & SWAP_HAS_CACHE));
 			if (!vm_swap_full())
 				return false;
 			*need_reclaim = true;
-			continue;
-		default:
-			return false;
 		}
 	}
 
@@ -821,7 +814,8 @@ static void swap_reclaim_full_clusters(struct swap_info_struct *si, bool force)
 		to_scan--;
 
 		while (offset < end) {
-			if (READ_ONCE(map[offset]) == SWAP_HAS_CACHE) {
+			if (!swap_count(map[offset]) &&
+			    swp_te_is_folio(__swap_table_get(ci, offset))) {
 				spin_unlock(&ci->lock);
 				nr_reclaim = __try_to_reclaim_swap(si, offset,
 								   TTRS_ANYWAY);
@@ -1590,7 +1584,7 @@ void __swap_cache_put_entries(struct swap_info_struct *si,
 			      struct swap_cluster_info *ci,
 			      swp_entry_t entry, unsigned int size)
 {
-	if (swap_only_has_cache(si, swp_offset(entry), size))
+	if (swap_only_has_cache(si, ci, swp_offset(entry), size))
 		swap_free_entries(si, ci, swp_offset(entry), size);
 	else
 		for (int i = 0; i < size; i++, entry.val++)
@@ -1802,6 +1796,7 @@ void do_put_swap_entries(swp_entry_t entry, int nr)
 	struct swap_info_struct *si;
 	bool any_only_cache = false;
 	unsigned long offset;
+	swp_te_t swp_te;
 
 	si = get_swap_device(entry);
 	if (WARN_ON_ONCE(!si))
@@ -1826,7 +1821,8 @@ void do_put_swap_entries(swp_entry_t entry, int nr)
 	 */
 	for (offset = start_offset; offset < end_offset; offset += nr) {
 		nr = 1;
-		if (READ_ONCE(si->swap_map[offset]) == SWAP_HAS_CACHE) {
+		swp_te = __swap_table_get(swp_offset_cluster(si, offset), offset);
+		if (!swap_count(si->swap_map[offset]) && swp_te_is_folio(swp_te)) {
 			/*
 			 * Folios are always naturally aligned in swap so
 			 * advance forward to the next boundary. Zero means no

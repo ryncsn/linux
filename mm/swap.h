@@ -186,6 +186,7 @@ static inline struct address_space *swap_address_space(swp_entry_t entry)
 extern struct folio *swap_cache_get_folio(swp_entry_t entry);
 extern struct folio *swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
 					  void **shadow, bool swapin);
+extern bool swap_cache_check_folio(swp_entry_t entry);
 extern void *swap_cache_get_shadow(swp_entry_t entry);
 /* Below helpers requires the caller to lock the swap cluster. */
 extern void __swap_cache_del_folio(swp_entry_t entry,
@@ -393,6 +394,11 @@ static inline void __swap_cache_override_folio(
 static inline void *swap_cache_get_shadow(swp_entry_t end)
 {
 	return NULL;
+}
+
+static inline bool swap_cache_check_folio(swp_entry_t entry)
+{
+	return false;
 }
 
 static inline unsigned int folio_swap_flags(struct folio *folio)

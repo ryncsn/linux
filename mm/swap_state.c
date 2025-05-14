@@ -267,6 +267,17 @@ struct folio *swap_cache_get_folio(swp_entry_t entry)
 }
 
 /*
+ * Check if a swap entry has folio cached, may return false positive.
+ * Caller must hold a reference of the swap device or pin it in other ways.
+ */
+bool swap_cache_check_folio(swp_entry_t entry)
+{
+	swp_te_t swp_te;
+	swp_te = __swap_table_get(swp_cluster(entry), swp_offset(entry));
+	return swp_te_is_folio(swp_te);
+}
+
+/*
  * If we are the only user, then try to free up the swap cache.
  *
  * Its ok to check the swapcache flag without the folio lock
