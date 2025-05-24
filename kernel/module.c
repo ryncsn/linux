@@ -57,6 +57,7 @@
 #include <linux/bsearch.h>
 #include <linux/dynamic_debug.h>
 #include <linux/audit.h>
+#include <linux/delay.h>
 #include <uapi/linux/module.h>
 #include "module-internal.h"
 
@@ -4259,6 +4260,8 @@ SYSCALL_DEFINE3(init_module, void __user *, umod,
 {
 	int err;
 	struct load_info info = { };
+
+	msleep(5);
 
 	err = may_init_module();
 	if (err)
