@@ -533,51 +533,10 @@ struct pi_entry {
 #define pr_cont(fmt, ...) \
 	printk(KERN_CONT fmt, ##__VA_ARGS__)
 
-/**
- * pr_devel - Print a debug-level message conditionally
- * @fmt: format string
- * @...: arguments for the format string
- *
- * This macro expands to a printk with KERN_DEBUG loglevel if DEBUG is
- * defined. Otherwise it does nothing.
- *
- * It uses pr_fmt() to generate the format string.
- */
-#ifdef DEBUG
-#define pr_devel(fmt, ...) \
-	printk(KERN_DEBUG pr_fmt(fmt), ##__VA_ARGS__)
-#else
 #define pr_devel(fmt, ...) \
 	no_printk(KERN_DEBUG pr_fmt(fmt), ##__VA_ARGS__)
-#endif
-
-
-/* If you are writing a driver, please use dev_dbg instead */
-#if defined(CONFIG_DYNAMIC_DEBUG) || \
-	(defined(CONFIG_DYNAMIC_DEBUG_CORE) && defined(DYNAMIC_DEBUG_MODULE))
-#include <linux/dynamic_debug.h>
-
-/**
- * pr_debug - Print a debug-level message conditionally
- * @fmt: format string
- * @...: arguments for the format string
- *
- * This macro expands to dynamic_pr_debug() if CONFIG_DYNAMIC_DEBUG is
- * set. Otherwise, if DEBUG is defined, it's equivalent to a printk with
- * KERN_DEBUG loglevel. If DEBUG is not defined it does nothing.
- *
- * It uses pr_fmt() to generate the format string (dynamic_pr_debug() uses
- * pr_fmt() internally).
- */
-#define pr_debug(fmt, ...)			\
-	dynamic_pr_debug(fmt, ##__VA_ARGS__)
-#elif defined(DEBUG)
-#define pr_debug(fmt, ...) \
-	printk(KERN_DEBUG pr_fmt(fmt), ##__VA_ARGS__)
-#else
 #define pr_debug(fmt, ...) \
 	no_printk(KERN_DEBUG pr_fmt(fmt), ##__VA_ARGS__)
-#endif
 
 /*
  * Print a one-time message (analogous to WARN_ONCE() et al):
