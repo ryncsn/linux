@@ -420,8 +420,6 @@ static inline bool gfp_compaction_allowed(gfp_t gfp_mask)
 	return IS_ENABLED(CONFIG_COMPACTION) && (gfp_mask & __GFP_IO);
 }
 
-extern gfp_t vma_thp_gfp_mask(struct vm_area_struct *vma);
-
 #ifdef CONFIG_CONTIG_ALLOC
 
 typedef unsigned int __bitwise acr_flags_t;
