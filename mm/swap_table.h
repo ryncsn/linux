@@ -72,6 +72,7 @@ static inline swp_te_t shadow_swp_te(void *shadow)
 	BUILD_BUG_ON((BITS_PER_XA_VALUE + 1) != BITS_PER_BYTE * sizeof(swp_te_t));
 	BUILD_BUG_ON((unsigned long)xa_mk_value(0) != SWP_TE_SHADOW_MARK);
 	VM_WARN_ON_ONCE(shadow && !xa_is_value(shadow));
+	VM_WARN_ON((unsigned long)shadow & SWP_TE_COUNT_MASK);
 	swp_te.counter |= SWP_TE_SHADOW_MARK;
 	return swp_te;
 }
