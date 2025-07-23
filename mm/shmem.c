@@ -1753,20 +1753,6 @@ static inline struct mempolicy *shmem_get_sbmpol(struct shmem_sb_info *sbinfo)
 static struct mempolicy *shmem_get_pgoff_policy(struct shmem_inode_info *info,
 			pgoff_t index, unsigned int order, pgoff_t *ilx);
 
-static struct folio *shmem_swapin_cluster(swp_entry_t swap, gfp_t gfp,
-			struct shmem_inode_info *info, pgoff_t index)
-{
-	struct mempolicy *mpol;
-	pgoff_t ilx;
-	struct folio *folio;
-
-	mpol = shmem_get_pgoff_policy(info, index, 0, &ilx);
-	folio = swap_cluster_readahead(swap, gfp, mpol, ilx);
-	mpol_cond_put(mpol);
-
-	return folio;
-}
-
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 bool shmem_hpage_pmd_enabled(void)
 {
@@ -1989,9 +1975,10 @@ unlock:
 	return ERR_PTR(error);
 }
 
-static struct folio *shmem_swap_alloc_folio(struct inode *inode,
-		struct vm_fault *vmf, pgoff_t index,
-		swp_entry_t entry, int order, gfp_t gfp)
+static struct folio *shmem_swap_alloc_folio(
+	struct swap_info_struct *si, struct inode *inode,
+	struct vm_fault *vmf, pgoff_t index,
+	swp_entry_t entry, int order, gfp_t gfp)
 {
 	pgoff_t ilx;
 	struct folio *folio;
@@ -2000,7 +1987,12 @@ static struct folio *shmem_swap_alloc_folio(struct inode *inode,
 	struct shmem_inode_info *info = SHMEM_I(inode);
 
 	mpol = shmem_get_pgoff_policy(info, index, order, &ilx);
-	folio = swapin_entry(entry, gfp, orders, vmf, mpol, ilx);
+	if (data_race(si->flags & SWP_SYNCHRONOUS_IO))
+		/* Direct swapin skipping swap cache & readahead */
+		folio = swapin_entry(entry, gfp, orders, vmf, mpol, ilx);
+	else
+		/* Cached swapin only supports order 0 folio */
+		folio = swap_cluster_readahead(entry, gfp, mpol, ilx);
 	mpol_cond_put(mpol);
 
 	VM_WARN_ON_ONCE(folio && folio_order(folio) && folio_order(folio) != order);
@@ -2250,13 +2242,8 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 	/* Look it up and read it in.. */
 	folio = swap_cache_get_folio(swap);
 	if (!folio) {
-		if (data_race(si->flags & SWP_SYNCHRONOUS_IO))
-			/* Direct swapin skipping swap cache & readahead */
-			folio = shmem_swap_alloc_folio(inode, vmf, index,
-						       swap, order, gfp);
-		else
-			/* Cached swapin only supports order 0 folio */
-			folio = shmem_swapin_cluster(swap, gfp, info, index);
+		folio = shmem_swap_alloc_folio(si, inode, vmf, index,
+					       swap, order, gfp);
 		if (!folio) {
 			error = -ENOMEM;
 			goto failed;
