@@ -500,7 +500,7 @@ struct folio *swap_cache_alloc_folio(swp_entry_t entry, gfp_t gfp_mask,
 	if (!folio)
 		goto out;
 
-	if (mem_cgroup_swapin_charge_folio(folio, NULL, gfp_mask, entry)) {
+	if (mem_cgroup_swapin_charge_folio(folio, gfp_mask, entry)) {
 		folio_put(folio);
 		goto out;
 	}

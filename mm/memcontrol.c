@@ -4765,8 +4765,8 @@ out:
  *
  * Returns 0 on success. Otherwise, an error code is returned.
  */
-int mem_cgroup_swapin_charge_folio(struct folio *folio, struct mm_struct *mm,
-				  gfp_t gfp, swp_entry_t entry)
+int mem_cgroup_swapin_charge_folio(struct folio *folio, gfp_t gfp,
+				   swp_entry_t entry)
 {
 	struct mem_cgroup *memcg;
 	unsigned short id;
@@ -4779,7 +4779,7 @@ int mem_cgroup_swapin_charge_folio(struct folio *folio, struct mm_struct *mm,
 	rcu_read_lock();
 	memcg = mem_cgroup_from_id(id);
 	if (!memcg || !css_tryget_online(&memcg->css))
-		memcg = get_mem_cgroup_from_mm(mm);
+		memcg = get_mem_cgroup_from_current();
 	rcu_read_unlock();
 
 	ret = charge_memcg(folio, memcg, gfp);

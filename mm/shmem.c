@@ -2052,8 +2052,7 @@ retry:
 		goto fallback;
 	}
 
-	if (mem_cgroup_swapin_charge_folio(folio, vma ? vma->vm_mm : NULL,
-					   alloc_gfp, entry)) {
+	if (mem_cgroup_swapin_charge_folio(folio, alloc_gfp, entry)) {
 		folio_put(folio);
 		folio = ERR_PTR(-ENOMEM);
 		goto fallback;

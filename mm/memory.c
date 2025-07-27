@@ -4426,8 +4426,7 @@ static struct folio *__alloc_swap_folio(struct vm_fault *vmf)
 		return NULL;
 
 	entry = pte_to_swp_entry(vmf->orig_pte);
-	if (mem_cgroup_swapin_charge_folio(folio, vma->vm_mm,
-					   GFP_KERNEL, entry)) {
+	if (mem_cgroup_swapin_charge_folio(folio, GFP_KERNEL, entry)) {
 		folio_put(folio);
 		return NULL;
 	}
@@ -4566,8 +4565,7 @@ static struct folio *alloc_swap_folio(struct vm_fault *vmf)
 		addr = ALIGN_DOWN(vmf->address, PAGE_SIZE << order);
 		folio = vma_alloc_folio(gfp, order, vma, addr);
 		if (folio) {
-			if (!mem_cgroup_swapin_charge_folio(folio, vma->vm_mm,
-							    gfp, entry))
+			if (!mem_cgroup_swapin_charge_folio(folio, gfp, entry))
 				return folio;
 			count_mthp_stat(order, MTHP_STAT_SWPIN_FALLBACK_CHARGE);
 			folio_put(folio);
