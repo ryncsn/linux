@@ -1850,7 +1850,7 @@ static struct page *mapping_get_entry(struct address_space *mapping,
 repeat:
 	xas_reset(&xas);
 	page = xas_load(&xas);
-	if (xas_retry(&xas, page))
+	if (unlikely(xas_retry(&xas, page)))
 		goto repeat;
 	/*
 	 * A shadow entry of a recently evicted page, or a swap entry from
@@ -2008,7 +2008,7 @@ retry:
 	else
 		page = xas_find_marked(xas, max, mark);
 
-	if (xas_retry(xas, page))
+	if (unlikely(xas_retry(xas, page)))
 		goto retry;
 	/*
 	 * A shadow entry of a recently evicted page, a swap
