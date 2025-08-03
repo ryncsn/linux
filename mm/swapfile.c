@@ -1816,35 +1816,6 @@ int swp_swapcount(swp_entry_t entry)
 	return count;
 }
 
-static bool swap_page_trans_huge_swapped(struct swap_info_struct *si,
-					 swp_entry_t entry, int order)
-{
-	struct swap_cluster_info *ci;
-	unsigned int nr_pages = 1 << order;
-	unsigned long roffset = swp_offset(entry);
-	unsigned long offset = round_down(roffset, nr_pages);
-	int i;
-	bool ret = false;
-
-	ci = swap_lock_cluster(si, offset);
-	if (!ci->table)
-		return false;
-	if (nr_pages == 1) {
-		if (swp_te_get_count(__swap_table_get(ci, roffset)))
-			ret = true;
-		goto unlock_out;
-	}
-	for (i = 0; i < nr_pages; i++) {
-		if (swp_te_get_count(__swap_table_get(ci, offset + i))) {
-			ret = true;
-			break;
-		}
-	}
-unlock_out:
-	swap_unlock_cluster(ci);
-	return ret;
-}
-
 static bool folio_swapcache_freeable(struct folio *folio)
 {
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
@@ -1873,19 +1844,28 @@ static bool folio_swapcache_freeable(struct folio *folio)
 	return true;
 }
 
-static bool folio_swapped(struct folio *folio)
+static bool folio_may_swapped(struct folio *folio)
 {
+	swp_te_t swp_te;
+	bool ret = false;
+	pgoff_t offset, end;
+	struct swap_cluster_info *ci;
 	swp_entry_t entry = folio->swap;
-	struct swap_info_struct *si;
+	unsigned long nr_pages = folio_nr_pages(folio);
 
 	VM_WARN_ON_ONCE_FOLIO(!folio_test_locked(folio), folio);
 	VM_WARN_ON_ONCE_FOLIO(!folio_test_swapcache(folio), folio);
 
-	si = swp_info(entry);
-	if (!IS_ENABLED(CONFIG_THP_SWAP) || likely(!folio_test_large(folio)))
-		return swap_entry_swapped(swp_info(entry), entry);
+	offset = swp_offset(entry);
+	end = offset + nr_pages;
+	ci = swp_cluster(entry);
+	do {
+		swp_te = __swap_table_get(ci, offset);
+		if (swp_te_get_count(swp_te))
+			ret = true;
+	} while (++offset < end);
 
-	return swap_page_trans_huge_swapped(si, entry, folio_order(folio));
+	return ret;
 }
 
 /**
@@ -1901,7 +1881,7 @@ bool folio_free_swap(struct folio *folio)
 {
 	if (!folio_swapcache_freeable(folio))
 		return false;
-	if (folio_swapped(folio))
+	if (folio_may_swapped(folio))
 		return false;
 
 	swap_cache_del_folio(folio);
