@@ -181,6 +181,7 @@ static inline struct address_space *swap_address_space(swp_entry_t entry)
 
 /* Below helpers requires the caller to pin the swap device. */
 extern struct folio *swap_cache_get_folio(swp_entry_t entry);
+extern bool swap_cache_check_folio(swp_entry_t entry);
 extern void *swap_cache_get_shadow(swp_entry_t entry);
 extern int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
 				void **shadow, bool swapin);
@@ -267,8 +268,6 @@ static inline int swap_zeromap_batch(swp_entry_t entry, int max_nr,
 
 static inline int non_swapcache_batch(swp_entry_t entry, int max_nr)
 {
-	struct swap_info_struct *si = swp_info(entry);
-	pgoff_t offset = swp_offset(entry);
 	int i;
 
 	/*
@@ -277,8 +276,9 @@ static inline int non_swapcache_batch(swp_entry_t entry, int max_nr)
 	 * be in conflict with the folio in swap cache.
 	 */
 	for (i = 0; i < max_nr; i++) {
-		if ((si->swap_map[offset + i] & SWAP_HAS_CACHE))
-			return i;
+		if (swap_cache_check_folio(entry))
+			break;
+		entry.val++;
 	}
 
 	return i;
@@ -366,6 +366,11 @@ static inline int swap_writeout(struct folio *folio,
 static inline struct folio *swap_cache_get_folio(swp_entry_t entry)
 {
 	return NULL;
+}
+
+static inline bool swap_cache_check_folio(swp_entry_t entry)
+{
+	return false;
 }
 
 static inline void *swap_cache_get_shadow(swp_entry_t end)

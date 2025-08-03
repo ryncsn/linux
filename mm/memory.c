@@ -4550,6 +4550,7 @@ static struct folio *alloc_swap_folio(struct vm_fault *vmf)
 		addr = ALIGN_DOWN(vmf->address, nr_pages * PAGE_SIZE);
 		if (!can_swapin_thp(vmf, pte + pte_index(addr), addr, nr_pages))
 			continue;
+		/* Page table lock pins the swap entries / swap device */
 		if (unlikely(non_swapcache_batch(swap_entry, nr_pages) != nr_pages))
 			continue;
 		/* Zero map doesn't work with large folio yet. */
