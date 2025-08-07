@@ -289,8 +289,7 @@ static int brd_alloc(int i)
 		.max_hw_discard_sectors	= UINT_MAX,
 		.max_discard_segments	= 1,
 		.discard_granularity	= PAGE_SIZE,
-		.features		= BLK_FEAT_SYNCHRONOUS |
-					  BLK_FEAT_NOWAIT,
+		.features		= BLK_FEAT_NOWAIT,
 	};
 
 	brd = brd_find_or_alloc_device(i);
