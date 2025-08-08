@@ -54,7 +54,6 @@
 #include <linux/vmpressure.h>
 #include <linux/memremap.h>
 #include <linux/mm_inline.h>
-#include <linux/swap_cgroup.h>
 #include <linux/cpu.h>
 #include <linux/oom.h>
 #include <linux/lockdep.h>
@@ -4774,8 +4773,6 @@ int mem_cgroup_swapin_charge_folio(struct folio *folio, gfp_t gfp,
 	if (mem_cgroup_disabled())
 		return 0;
 
-	WARN_ON_ONCE(memcgid != lookup_swap_cgroup_id(entry));
-
 	rcu_read_lock();
 	/* TODO: if memcg is dead, still need to uncharge its swap */
 	memcg = mem_cgroup_from_id(memcgid);
@@ -5164,8 +5161,6 @@ int __mem_cgroup_try_charge_swap(struct folio *folio)
 		mem_cgroup_id_get_many(memcg, nr_pages - 1);
 	mod_memcg_state(memcg, MEMCG_SWAP, nr_pages);
 
-	swap_cgroup_record(folio, mem_cgroup_id(memcg), folio->swap);
-
 	return 0;
 }
 
@@ -5179,11 +5174,6 @@ void __mem_cgroup_uncharge_swap_entries(swp_entry_t entry,
 	struct mem_cgroup *memcg;
 
 	rcu_read_lock();
-	if (memcgid != lookup_swap_cgroup_id(entry)) {
-		pr_err_once("Entry Got memcgid %d, should be id %d\n", memcgid, lookup_swap_cgroup_id(entry));
-		WARN_ON_ONCE(1);
-	}
-	swap_cgroup_clear(entry, nr_pages);
 	memcg = mem_cgroup_from_id(memcgid);
 	if (memcg) {
 		if (!mem_cgroup_is_root(memcg)) {
@@ -5219,12 +5209,6 @@ void __mem_cgroup_uncharge_swap(struct folio *folio, int nr_subpage)
 		entry.val += nr_subpage;
 	}
 
-	if (mem_cgroup_id(memcg) != lookup_swap_cgroup_id(entry)) {
-		pr_err_once("Got memcgid %d, should be id %d\n", mem_cgroup_id(memcg), lookup_swap_cgroup_id(entry));
-		WARN_ON_ONCE(1);
-	}
-
-	swap_cgroup_clear(entry, nr_pages);
 	if (memcg) {
 		if (!mem_cgroup_is_root(memcg)) {
 			if (do_memsw_account())
