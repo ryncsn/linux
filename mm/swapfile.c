@@ -620,24 +620,6 @@ static void relocate_cluster(struct swap_info_struct *si,
 	}
 }
 
-/*
- * The cluster corresponding to page_nr will be used. The cluster will not be
- * added to free cluster list and its usage counter will be increased by 1.
- * Only used for initialization.
- */
-static void inc_cluster_info_page(struct swap_info_struct *si,
-	struct swap_cluster_info *cluster_info, unsigned long page_nr)
-{
-	unsigned long idx = page_nr / SWAPFILE_CLUSTER;
-	struct swap_cluster_info *ci;
-
-	ci = cluster_info + idx;
-	ci->count++;
-
-	VM_BUG_ON(ci->count > SWAPFILE_CLUSTER);
-	VM_BUG_ON(ci->flags);
-}
-
 static bool cluster_reclaim_range(struct swap_info_struct *si,
 				  struct swap_cluster_info *ci,
 				  unsigned long start, unsigned long end)
@@ -744,7 +726,7 @@ static unsigned int alloc_swap_scan_cluster(struct swap_info_struct *si,
 {
 	unsigned int next = SWAP_ENTRY_INVALID, found = SWAP_ENTRY_INVALID;
 	unsigned long start = ALIGN_DOWN(offset, SWAPFILE_CLUSTER);
-	unsigned long end = min(start + SWAPFILE_CLUSTER, si->max);
+	unsigned long end = start + SWAPFILE_CLUSTER;
 	unsigned int order = folio ? folio_order(folio) : 0;
 	unsigned long nr_pages = 1 << order;
 	bool need_reclaim, ret;
@@ -3162,28 +3144,24 @@ static unsigned long read_swap_header(struct swap_info_struct *si,
 	return maxpages;
 }
 
-static int setup_swap_map(struct swap_info_struct *si,
-			  union swap_header *swap_header,
-			  unsigned long maxpages)
+static int cluster_info_mark_bad(struct swap_info_struct *si,
+				 struct swap_cluster_info *cluster_info,
+				 pgoff_t offset)
 {
-	unsigned long i;
+	struct swap_cluster_info *ci = &cluster_info[offset / SWAPFILE_CLUSTER];
+	swp_te_t swp_te;
 
-	__swap_table_set(&si->cluster_info[0], 0, bad_swp_te());
-	for (i = 0; i < swap_header->info.nr_badpages; i++) {
-		unsigned int page_nr = swap_header->info.badpages[i];
-		if (page_nr == 0 || page_nr > swap_header->info.last_page)
-			return -EINVAL;
-		if (page_nr < maxpages) {
-			__swap_table_set(&si->cluster_info[page_nr / SWAPFILE_CLUSTER],
-					 page_nr, bad_swp_te());
-			si->pages--;
-		}
-	}
+	/* Marking bad slots must be done before cluster are added to list */
+	WARN_ON(ci->count >= SWAPFILE_CLUSTER);
+	WARN_ON(ci->flags);
 
-	if (!si->pages) {
-		pr_warn("Empty swap-file\n");
-		return -EINVAL;
-	}
+	swp_te = __swap_table_get(ci, offset);
+	if (!swp_te_is_null(swp_te))
+		return -EEXIST;
+
+	__swap_table_set(ci, offset, bad_swp_te());
+	ci->count++;
+	si->pages--;
 
 	return 0;
 }
@@ -3194,6 +3172,7 @@ static int setup_swap_clusters_info(struct swap_info_struct *si,
 {
 	unsigned long nr_clusters = DIV_ROUND_UP(maxpages, SWAPFILE_CLUSTER);
 	struct swap_cluster_info *cluster_info;
+	int ret = -ENOMEM;
 	unsigned long i;
 
 	cluster_info = kvcalloc(nr_clusters, sizeof(*cluster_info), GFP_KERNEL);
@@ -3217,22 +3196,34 @@ static int setup_swap_clusters_info(struct swap_info_struct *si,
 	}
 
 	/*
-	 * Mark unusable pages as unavailable. The clusters aren't
-	 * marked free yet, so no list operations are involved yet.
-	 *
-	 * See setup_swap_map(): header page, bad pages,
+	 * Mark unusable pages as unavailable: header page, bad pages,
 	 * and the EOF part of the last cluster.
 	 */
-	inc_cluster_info_page(si, cluster_info, 0);
+	cluster_info_mark_bad(si, cluster_info, 0);
 	for (i = 0; i < swap_header->info.nr_badpages; i++) {
 		unsigned int page_nr = swap_header->info.badpages[i];
 
-		if (page_nr >= maxpages)
-			continue;
-		inc_cluster_info_page(si, cluster_info, page_nr);
+		if (page_nr == 0 || page_nr > swap_header->info.last_page)
+			return -EINVAL;
+		if (page_nr < maxpages) {
+			ret = cluster_info_mark_bad(si, cluster_info, page_nr);
+			if (ret)
+				goto err_free;
+		}
 	}
-	for (i = maxpages; i < round_up(maxpages, SWAPFILE_CLUSTER); i++)
-		inc_cluster_info_page(si, cluster_info, i);
+
+	/* Mask the padding part of last cluster, ignore overlapped EOF. */
+	for (i = maxpages; i < round_up(maxpages, SWAPFILE_CLUSTER); i++) {
+		ret = cluster_info_mark_bad(si, cluster_info, i);
+		if (ret && ret != -EEXIST)
+			goto err_free;
+	}
+
+	if (!si->pages) {
+		pr_warn("Empty swap-file\n");
+		ret = -EINVAL;
+		goto err_free;
+	}
 
 	INIT_LIST_HEAD(&si->free_clusters);
 	INIT_LIST_HEAD(&si->full_clusters);
@@ -3259,7 +3250,7 @@ static int setup_swap_clusters_info(struct swap_info_struct *si,
 err_free:
 	free_swap_cluster_info(cluster_info, maxpages);
 err:
-	return -ENOMEM;
+	return ret;
 }
 
 SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
@@ -3378,10 +3369,6 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 		goto bad_swap_unlock_inode;
 
 	error = swap_cgroup_swapon(si->type, maxpages);
-	if (error)
-		goto bad_swap_unlock_inode;
-
-	error = setup_swap_map(si, swap_header, maxpages);
 	if (error)
 		goto bad_swap_unlock_inode;
 
