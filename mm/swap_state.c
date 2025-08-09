@@ -121,11 +121,36 @@ void *swap_cache_get_shadow(swp_entry_t entry)
 	return swp_te_is_shadow(swp_te) ? swp_te_shadow(swp_te) : NULL;
 }
 
+static void __swap_cache_do_add_folio(swp_entry_t entry, struct swap_cluster_info *ci,
+				      struct folio *folio)
+{
+	pgoff_t offset = swp_offset(entry), end;
+	unsigned long nr_pages = folio_nr_pages(folio);
+
+	/*
+	 * Allocator should always allocate aligned entries so folio based
+	 * operations never crossed more than one cluster.
+	 */
+	VM_WARN_ON_ONCE_FOLIO(!folio_test_locked(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(folio_test_swapcache(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(!folio_test_swapbacked(folio), folio);
+
+	end = offset + nr_pages;
+	do {
+		VM_WARN_ON(swp_te_is_folio(__swap_table_get(ci, offset)));
+		__swap_table_set_folio(ci, offset, folio);
+	} while (++offset < end);
+
+	folio_ref_add(folio, nr_pages);
+	folio_set_swapcache(folio);
+	folio->swap = entry;
+}
+
 /*
  * Try insert a folio for one or more swap-outed entry.
  */
 int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
-			 void **shadowp, bool swapin)
+			 void **shadowp)
 {
 	int err;
 	swp_te_t exist;
@@ -138,10 +163,6 @@ int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
 	start = swp_offset(entry);
 	end = start + nr_pages;
 
-	VM_WARN_ON_ONCE_FOLIO(!folio_test_locked(folio), folio);
-	VM_WARN_ON_ONCE_FOLIO(folio_test_swapcache(folio), folio);
-	VM_WARN_ON_ONCE_FOLIO(!folio_test_swapbacked(folio), folio);
-
 	offset = start;
 	si = swp_info(entry);
 	ci = swap_lock_cluster(si, offset);
@@ -151,21 +172,14 @@ int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
 			err = -EEXIST;
 			goto fail;
 		}
-		if (swapin && __swap_cache_set_entry(si, ci, offset)) {
+		if (__swap_cache_set_entry(si, ci, offset)) {
 			err = -ENOENT;
 			goto fail;
 		}
 		shadow = swp_te_shadow(exist);
 	} while (++offset < end);
 
-	offset = start;
-	do {
-		__swap_table_set_folio(ci, offset, folio);
-	} while (++offset < end);
-
-	folio_ref_add(folio, nr_pages);
-	folio_set_swapcache(folio);
-	folio->swap = entry;
+	__swap_cache_do_add_folio(entry, ci, folio);
 	swap_unlock_cluster(ci);
 
 	node_stat_mod_folio(folio, NR_FILE_PAGES, nr_pages);
@@ -180,6 +194,20 @@ fail:
 	swap_unlock_cluster(ci);
 
 	return err;
+}
+
+/*
+ * For swap allocator's initial allocation of entries to a folio.
+ * Caller holds the cluster lock and ensures the range is free.
+ */
+void __swap_cache_add_folio(swp_entry_t entry, struct swap_cluster_info *ci,
+			    struct folio *folio)
+{
+	unsigned long nr_pages = folio_nr_pages(folio);
+
+	__swap_cache_do_add_folio(entry, ci, folio);
+	node_stat_mod_folio(folio, NR_FILE_PAGES, nr_pages);
+	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, nr_pages);
 }
 
 /*
@@ -402,7 +430,7 @@ static struct folio *swap_cache_add_or_get(swp_entry_t entry,
 	__folio_set_locked(folio);
 	__folio_set_swapbacked(folio);
 again:
-	err = swap_cache_add_folio(entry, folio, &shadow, true);
+	err = swap_cache_add_folio(entry, folio, &shadow);
 	if (err) {
 		if (err == -EEXIST && nr_pages == 1) {
 			swapcache = swap_cache_get_folio(entry);

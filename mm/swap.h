@@ -184,7 +184,10 @@ extern struct folio *swap_cache_get_folio(swp_entry_t entry);
 extern bool swap_cache_check_folio(swp_entry_t entry);
 extern void *swap_cache_get_shadow(swp_entry_t entry);
 extern int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
-				void **shadow, bool swapin);
+				void **shadow);
+extern void __swap_cache_add_folio(swp_entry_t entry,
+				   struct swap_cluster_info *ci,
+				   struct folio *folio);
 extern struct folio *swap_cache_alloc_folio(swp_entry_t entry, gfp_t gfp_flags,
 					    struct mempolicy *mpol, pgoff_t ilx,
 					    bool *alloced);
@@ -378,8 +381,7 @@ static inline void *swap_cache_get_shadow(swp_entry_t end)
 	return NULL;
 }
 
-static inline int swap_cache_add_folio(swp_entry_t end, struct folio *folio,
-				       void **shadow, bool swapin)
+static inline int swap_cache_add_folio(swp_entry_t end, struct folio *folio, void **shadow)
 {
 	return -EINVAL;
 }
