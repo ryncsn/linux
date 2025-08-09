@@ -172,7 +172,7 @@ int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
 			err = -EEXIST;
 			goto fail;
 		}
-		if (__swap_cache_set_entry(si, ci, offset)) {
+		if (!__swap_count(swp_entry(si->type, offset))) {
 			err = -ENOENT;
 			goto fail;
 		}
@@ -189,10 +189,7 @@ int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
 		*shadowp = shadow;
 	return 0;
 fail:
-	while (offset-- > start)
-		__swap_cache_put_entries(si, ci, swp_entry(si->type, offset), 1);
 	swap_unlock_cluster(ci);
-
 	return err;
 }
 
@@ -222,6 +219,7 @@ void __swap_cache_del_folio(swp_entry_t entry,
 	pgoff_t offset, start, end;
 	struct swap_info_struct *si;
 	struct swap_cluster_info *ci;
+	bool folio_swapped = false, need_free = false;
 	unsigned long nr_pages = folio_nr_pages(folio);
 
 	VM_WARN_ON_ONCE_FOLIO(!folio_test_locked(folio), folio);
@@ -239,13 +237,26 @@ void __swap_cache_del_folio(swp_entry_t entry,
 		VM_WARN_ON_ONCE(swp_te_folio(exist) != folio);
 		/* If shadow is NULL, we sets an empty shadow */
 		__swap_table_set_shadow(ci, offset, shadow);
+		if (__swap_count(swp_entry(si->type, offset)))
+			folio_swapped = true;
+		else
+			need_free = true;
 	} while (++offset < end);
 
 	folio->swap.val = 0;
 	folio_clear_swapcache(folio);
 	node_stat_mod_folio(folio, NR_FILE_PAGES, -nr_pages);
 	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr_pages);
-	__swap_cache_put_entries(si, ci, entry, nr_pages);
+
+	if (!folio_swapped) {
+		__swap_free_entries(si, ci, start, nr_pages);
+	} else if (need_free) {
+		offset = start;
+		do {
+			if (!__swap_count(swp_entry(si->type, offset)))
+				__swap_free_entries(si, ci, offset, 1);
+		} while (++offset < end);
+	}
 }
 
 /* For huge page splitting, override an old folio with a smaller new one. */
