@@ -1582,6 +1582,7 @@ int folio_alloc_swap(struct folio *folio, gfp_t gfp)
 {
 	unsigned int order = folio_order(folio);
 	unsigned int size = 1 << order;
+	struct mem_cgroup *memcg;
 
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	VM_BUG_ON_FOLIO(!folio_test_uptodate(folio), folio);
@@ -1609,12 +1610,17 @@ int folio_alloc_swap(struct folio *folio, gfp_t gfp)
 		swap_alloc_slow(folio);
 	local_unlock(&percpu_swap_cluster.lock);
 
-	/* Need to call this even if allocation failed, for MEMCG_SWAP_FAIL. */
-	if (mem_cgroup_try_charge_swap(folio, folio->swap))
-		swap_cache_del_folio(folio);
-
-	if (unlikely(!folio_test_swapcache(folio)))
+	if (unlikely(!folio_test_swapcache(folio))) {
+		memcg = folio_memcg(folio);
+		if (cgroup_subsys_on_dfl(memory_cgrp_subsys) && memcg)
+			memcg_memory_event(memcg, MEMCG_SWAP_FAIL);
 		return -ENOMEM;
+	}
+
+	if (mem_cgroup_try_charge_swap(folio, folio->swap)) {
+		swap_cache_del_folio(folio);
+		return -ENOMEM;
+	}
 
 	return 0;
 }
