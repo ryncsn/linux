@@ -1474,14 +1474,14 @@ next_cluster:
 			continue;
 		}
 		if (batch_head) {
-			__swap_free_entries(si, ci, batch_head, offset - batch_head);
+			__swap_free_entries(si, ci, batch_head, offset - batch_head, head_memcgid);
 			batch_head = SWAP_ENTRY_INVALID;
 		}
 		swap_put_entry_locked(si, ci, offset);
 	} while (++offset < cluster_end);
 
 	if (batch_head) {
-		__swap_free_entries(si, ci, batch_head, offset - batch_head);
+		__swap_free_entries(si, ci, batch_head, offset - batch_head, head_memcgid);
 		batch_head = SWAP_ENTRY_INVALID;
 	}
 
@@ -1739,8 +1739,8 @@ put_out:
 }
 
 void __swap_free_entries(struct swap_info_struct *si,
-		       struct swap_cluster_info *ci,
-		       unsigned long start, unsigned int nr_pages)
+			 struct swap_cluster_info *ci,
+			 unsigned long start, unsigned int nr_pages, bool uncharge)
 {
 	swp_entry_t entry = swp_entry(si->type, start);
 	unsigned long offset = start, end = start + nr_pages;
@@ -1759,7 +1759,8 @@ void __swap_free_entries(struct swap_info_struct *si,
 		__swap_table_set(ci, offset, null_swp_te());
 	} while (++offset < end);
 
-	mem_cgroup_uncharge_swap(entry, nr_pages);
+	if (uncharge)
+		mem_cgroup_uncharge_swap(entry, nr_pages);
 
 	if (!ci->count)
 		free_cluster(si, ci);

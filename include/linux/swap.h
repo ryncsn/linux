@@ -583,6 +583,12 @@ static inline void folio_throttle_swaprate(struct folio *folio, gfp_t gfp)
 }
 #endif
 
+/* Whether legacy memory+swap accounting is active */
+static inline bool do_memsw_account(void)
+{
+	return !cgroup_subsys_on_dfl(memory_cgrp_subsys);
+}
+
 #if defined(CONFIG_MEMCG) && defined(CONFIG_SWAP)
 /* Used for non-memsw style charging only */
 int __mem_cgroup_try_charge_swap(struct folio *folio);

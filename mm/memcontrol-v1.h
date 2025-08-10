@@ -36,12 +36,6 @@ struct mem_cgroup *mem_cgroup_id_get_online(struct mem_cgroup *memcg);
 /* Cgroup v1-specific declarations */
 #ifdef CONFIG_MEMCG_V1
 
-/* Whether legacy memory+swap accounting is active */
-static inline bool do_memsw_account(void)
-{
-	return !cgroup_subsys_on_dfl(memory_cgrp_subsys);
-}
-
 unsigned long memcg_events_local(struct mem_cgroup *memcg, int event);
 unsigned long memcg_page_state_local(struct mem_cgroup *memcg, int idx);
 unsigned long memcg_page_state_local_output(struct mem_cgroup *memcg, int item);

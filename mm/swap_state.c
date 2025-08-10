@@ -279,6 +279,7 @@ struct folio *swap_cache_alloc_folio(swp_entry_t target_entry, gfp_t gfp_mask,
 		VM_WARN_ON_ONCE(!shadow);
 		workingset_refault(folio, shadow);
 
+		/* For memsw accouting, swap is uncharged here */
 		memcg1_swapin(folio_entry, nr_pages);
 		node_stat_mod_folio(folio, NR_FILE_PAGES, nr_pages);
 		lruvec_stat_mod_folio(folio, NR_SWAPCACHE, nr_pages);
@@ -352,12 +353,12 @@ void __swap_cache_del_folio(swp_entry_t entry,
 	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr_pages);
 
 	if (!folio_swapped) {
-		__swap_free_entries(si, ci, start, nr_pages);
+		__swap_free_entries(si, ci, start, nr_pages, !do_memsw_account());
 	} else if (need_free) {
 		offset = start;
 		do {
 			if (!swp_te_get_count(__swap_table_get(ci, offset)))
-				__swap_free_entries(si, ci, offset, 1);
+				__swap_free_entries(si, ci, offset, 1, !do_memsw_account());
 		} while (++offset < end);
 	}
 }

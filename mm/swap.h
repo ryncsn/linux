@@ -156,8 +156,9 @@ void folio_put_swap(struct folio *folio, struct page *subpage);
 
 /* For internal use */
 extern void __swap_free_entries(struct swap_info_struct *si,
-			      struct swap_cluster_info *ci,
-			      unsigned long offset, unsigned int nr_pages);
+				struct swap_cluster_info *ci,
+				unsigned long offset, unsigned int nr_pages,
+				bool uncharge);
 
 /* linux/mm/page_io.c */
 int sio_pool_init(void);
