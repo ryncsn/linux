@@ -233,6 +233,9 @@ static void unpack_shadow(void *shadow, int *memcgidp, pg_data_t **pgdat,
 	*workingsetp = workingset;
 }
 
+extern void mem_cgroup_id_put(struct mem_cgroup *memcg);
+extern struct mem_cgroup *mem_cgroup_id_get_online(struct mem_cgroup *memcg);
+
 #ifdef CONFIG_LRU_GEN
 
 static void *lru_gen_eviction(struct folio *folio)
@@ -240,6 +243,7 @@ static void *lru_gen_eviction(struct folio *folio)
 	int hist;
 	unsigned long token;
 	unsigned long min_seq;
+	unsigned short memcgid;
 	struct lruvec *lruvec;
 	struct lru_gen_folio *lrugen;
 	int type = folio_is_file_lru(folio);
@@ -249,6 +253,10 @@ static void *lru_gen_eviction(struct folio *folio)
 	int tier = lru_tier_from_refs(refs, workingset);
 	struct mem_cgroup *memcg = folio_memcg(folio);
 	struct pglist_data *pgdat = folio_pgdat(folio);
+
+	memcg = mem_cgroup_id_get_online(folio_memcg(folio));
+	memcgid = mem_cgroup_id(memcg);
+	mem_cgroup_id_put(memcg);
 
 	BUILD_BUG_ON(LRU_GEN_WIDTH + LRU_REFS_WIDTH >
 		     BITS_PER_LONG - max(EVICTION_SHIFT, EVICTION_SHIFT_ANON));
@@ -261,7 +269,7 @@ static void *lru_gen_eviction(struct folio *folio)
 	hist = lru_hist_from_seq(min_seq);
 	atomic_long_add(delta, &lrugen->evicted[hist][type][tier]);
 
-	return pack_shadow(mem_cgroup_id(memcg), pgdat, token, workingset, type);
+	return pack_shadow(memcgid, pgdat, token, workingset, type);
 }
 
 /*
@@ -391,6 +399,7 @@ void *workingset_eviction(struct folio *folio, struct mem_cgroup *target_memcg)
 	int file = folio_is_file_lru(folio);
 	unsigned long eviction;
 	struct lruvec *lruvec;
+	struct mem_cgroup *memcg;
 	int memcgid;
 
 	/* Folio is fully exclusive and pins folio's memory cgroup pointer */
@@ -403,10 +412,13 @@ void *workingset_eviction(struct folio *folio, struct mem_cgroup *target_memcg)
 
 	lruvec = mem_cgroup_lruvec(target_memcg, pgdat);
 	/* XXX: target_memcg can be NULL, go through lruvec */
-	memcgid = mem_cgroup_id(lruvec_memcg(lruvec));
+	memcg = mem_cgroup_id_get_online(lruvec_memcg(lruvec));
+	memcgid = mem_cgroup_id(memcg);
+	mem_cgroup_id_put(memcg);
 	eviction = atomic_long_read(&lruvec->nonresident_age);
 	eviction >>= bucket_order[file];
 	workingset_age_nonresident(lruvec, folio_nr_pages(folio));
+
 	return pack_shadow(memcgid, pgdat, eviction,
 			   folio_test_workingset(folio), folio_is_file_lru(folio));
 }

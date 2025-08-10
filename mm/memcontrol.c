@@ -3581,7 +3581,7 @@ static void mem_cgroup_id_put_many(struct mem_cgroup *memcg, unsigned int n)
 	}
 }
 
-static inline void mem_cgroup_id_put(struct mem_cgroup *memcg)
+void mem_cgroup_id_put(struct mem_cgroup *memcg)
 {
 	mem_cgroup_id_put_many(memcg, 1);
 }
@@ -4777,6 +4777,7 @@ int mem_cgroup_swapin_charge_folio(struct folio *folio, gfp_t gfp,
 	WARN_ON_ONCE(memcgid != lookup_swap_cgroup_id(entry));
 
 	rcu_read_lock();
+	/* TODO: if memcg is dead, still need to uncharge its swap */
 	memcg = mem_cgroup_from_id(memcgid);
 	if (!memcg || !css_tryget_online(&memcg->css))
 		memcg = get_mem_cgroup_from_current();
@@ -5146,6 +5147,9 @@ int __mem_cgroup_try_charge_swap(struct folio *folio)
 		return 0;
 
 	memcg = mem_cgroup_id_get_online(memcg);
+	if (memcg != folio_memcg(folio)) {
+		// pr_err_once("Dying cg swapout\n");
+	}
 
 	if (!mem_cgroup_is_root(memcg) &&
 	    !page_counter_try_charge(&memcg->swap, nr_pages, &counter)) {
@@ -5175,6 +5179,10 @@ void __mem_cgroup_uncharge_swap_entries(swp_entry_t entry,
 	struct mem_cgroup *memcg;
 
 	rcu_read_lock();
+	if (memcgid != lookup_swap_cgroup_id(entry)) {
+		pr_err_once("Entry Got memcgid %d, should be id %d\n", memcgid, lookup_swap_cgroup_id(entry));
+		WARN_ON_ONCE(1);
+	}
 	swap_cgroup_clear(entry, nr_pages);
 	memcg = mem_cgroup_from_id(memcgid);
 	if (memcg) {
@@ -5206,8 +5214,15 @@ void __mem_cgroup_uncharge_swap(struct folio *folio, int nr_subpage)
 	VM_WARN_ON_ONCE_FOLIO(!memcg, folio);
 	VM_WARN_ON_ONCE_FOLIO(!folio_test_locked(folio), folio);
 
-	if (nr_subpage > 0)
+	if (nr_subpage > 0) {
+		pr_err("Error\n");
 		entry.val += nr_subpage;
+	}
+
+	if (mem_cgroup_id(memcg) != lookup_swap_cgroup_id(entry)) {
+		pr_err_once("Got memcgid %d, should be id %d\n", mem_cgroup_id(memcg), lookup_swap_cgroup_id(entry));
+		WARN_ON_ONCE(1);
+	}
 
 	swap_cgroup_clear(entry, nr_pages);
 	if (memcg) {
