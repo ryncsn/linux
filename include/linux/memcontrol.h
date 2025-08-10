@@ -1883,7 +1883,7 @@ static inline void mem_cgroup_exit_user_fault(void)
 }
 
 void memcg1_swapout(struct folio *folio, swp_entry_t entry);
-void memcg1_swapin(swp_entry_t entry, unsigned int nr_pages);
+void memcg1_swapin(struct folio *folio);
 
 #else /* CONFIG_MEMCG_V1 */
 static inline
@@ -1916,7 +1916,7 @@ static inline void memcg1_swapout(struct folio *folio, swp_entry_t entry)
 {
 }
 
-static inline void memcg1_swapin(swp_entry_t entry, unsigned int nr_pages)
+static inline void memcg1_swapin(struct folio *folio)
 {
 }
 

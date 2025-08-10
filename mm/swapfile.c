@@ -1456,6 +1456,7 @@ static bool swap_put_entries(struct swap_info_struct *si,
 {
 	unsigned long offset = start, end = start + nr, cluster_end;
 	unsigned long batch_head = SWAP_ENTRY_INVALID;
+	unsigned short head_memcgid = 0, memcgid;
 	struct swap_cluster_info *ci;
 	bool has_cache = false;
 	swp_te_t swp_te;
@@ -1468,9 +1469,16 @@ next_cluster:
 			/* Let the swap cache (folio) handle the final free */
 			has_cache = true;
 		} else if (swp_te_get_count(swp_te) == 1) {
-			/* Free up continues last ref entries in batch */
-			if (!batch_head)
+			memcgid = swp_te_shadow_memcgid(swp_te);
+			if (!batch_head) {
+				head_memcgid = memcgid;
 				batch_head = offset;
+			} else if (head_memcgid != memcgid) {
+				__swap_free_entries(si, ci, batch_head, offset - batch_head, head_memcgid);
+				head_memcgid = memcgid;
+				batch_head = offset;
+			}
+			/* Free up continues last ref entries in batch */
 			continue;
 		}
 		if (batch_head) {
@@ -1740,7 +1748,8 @@ put_out:
 
 void __swap_free_entries(struct swap_info_struct *si,
 			 struct swap_cluster_info *ci,
-			 unsigned long start, unsigned int nr_pages, bool uncharge)
+			 unsigned long start, unsigned int nr_pages,
+			 unsigned short memcgid)
 {
 	swp_entry_t entry = swp_entry(si->type, start);
 	unsigned long offset = start, end = start + nr_pages;
@@ -1759,8 +1768,8 @@ void __swap_free_entries(struct swap_info_struct *si,
 		__swap_table_set(ci, offset, null_swp_te());
 	} while (++offset < end);
 
-	if (uncharge)
-		mem_cgroup_uncharge_swap(entry, nr_pages);
+	if (memcgid)
+		mem_cgroup_uncharge_swap_entries(entry, nr_pages, memcgid);
 
 	if (!ci->count)
 		free_cluster(si, ci);

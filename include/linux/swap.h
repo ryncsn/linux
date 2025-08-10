@@ -599,13 +599,24 @@ static inline int mem_cgroup_try_charge_swap(struct folio *folio)
 	return __mem_cgroup_try_charge_swap(folio);
 }
 
-/* Used for both memsw & non-memsw style uncharging */
-extern void __mem_cgroup_uncharge_swap(swp_entry_t entry, unsigned int nr_pages);
-static inline void mem_cgroup_uncharge_swap(swp_entry_t entry, unsigned int nr_pages)
+extern void __mem_cgroup_uncharge_swap(struct folio *folio, int nr_subpage);
+static inline void mem_cgroup_uncharge_swap(struct folio *folio, int nr_subpage)
 {
 	if (mem_cgroup_disabled())
 		return;
-	__mem_cgroup_uncharge_swap(entry, nr_pages);
+	__mem_cgroup_uncharge_swap(folio, nr_subpage);
+}
+
+extern void __mem_cgroup_uncharge_swap_entries(swp_entry_t entry,
+					       unsigned int nr_pages,
+					       unsigned short memcgid);
+static inline void mem_cgroup_uncharge_swap_entries(swp_entry_t entry,
+						    unsigned int nr_pages,
+						    unsigned short memcgid)
+{
+	if (mem_cgroup_disabled())
+		return;
+	__mem_cgroup_uncharge_swap_entries(entry, nr_pages, memcgid);
 }
 
 extern long mem_cgroup_get_nr_swap_pages(struct mem_cgroup *memcg);

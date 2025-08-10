@@ -5166,18 +5166,17 @@ int __mem_cgroup_try_charge_swap(struct folio *folio)
 }
 
 /**
- * __mem_cgroup_uncharge_swap - uncharge swap space
- * @entry: swap entry to uncharge
- * @nr_pages: the amount of swap space to uncharge
+ * __mem_cgroup_uncharge_swap_entries - uncharge swap space
  */
-void __mem_cgroup_uncharge_swap(swp_entry_t entry, unsigned int nr_pages)
+void __mem_cgroup_uncharge_swap_entries(swp_entry_t entry,
+					unsigned int nr_pages,
+					unsigned short memcgid)
 {
 	struct mem_cgroup *memcg;
-	unsigned short id;
 
-	id = swap_cgroup_clear(entry, nr_pages);
 	rcu_read_lock();
-	memcg = mem_cgroup_from_id(id);
+	swap_cgroup_clear(entry, nr_pages);
+	memcg = mem_cgroup_from_id(memcgid);
 	if (memcg) {
 		if (!mem_cgroup_is_root(memcg)) {
 			if (do_memsw_account())
@@ -5189,6 +5188,38 @@ void __mem_cgroup_uncharge_swap(swp_entry_t entry, unsigned int nr_pages)
 		mem_cgroup_id_put_many(memcg, nr_pages);
 	}
 	rcu_read_unlock();
+}
+
+/**
+ * __mem_cgroup_uncharge_swap - uncharge swap space
+ * @entry: swap entry to uncharge
+ * @nr_pages: the amount of swap space to uncharge
+ */
+void __mem_cgroup_uncharge_swap(struct folio *folio, int nr_subpage)
+{
+	long nr_pages = nr_subpage < 0 ? folio_nr_pages(folio) : 1;
+	swp_entry_t entry = folio->swap;
+	struct mem_cgroup *memcg;
+
+	memcg = folio_memcg(folio);
+
+	VM_WARN_ON_ONCE_FOLIO(!memcg, folio);
+	VM_WARN_ON_ONCE_FOLIO(!folio_test_locked(folio), folio);
+
+	if (nr_subpage > 0)
+		entry.val += nr_subpage;
+
+	swap_cgroup_clear(entry, nr_pages);
+	if (memcg) {
+		if (!mem_cgroup_is_root(memcg)) {
+			if (do_memsw_account())
+				page_counter_uncharge(&memcg->memsw, nr_pages);
+			else
+				page_counter_uncharge(&memcg->swap, nr_pages);
+		}
+		mod_memcg_state(memcg, MEMCG_SWAP, -nr_pages);
+		mem_cgroup_id_put_many(memcg, nr_pages);
+	}
 }
 
 long mem_cgroup_get_nr_swap_pages(struct mem_cgroup *memcg)

@@ -280,7 +280,7 @@ struct folio *swap_cache_alloc_folio(swp_entry_t target_entry, gfp_t gfp_mask,
 		workingset_refault(folio, shadow);
 
 		/* For memsw accouting, swap is uncharged here */
-		memcg1_swapin(folio_entry, nr_pages);
+		memcg1_swapin(folio);
 		node_stat_mod_folio(folio, NR_FILE_PAGES, nr_pages);
 		lruvec_stat_mod_folio(folio, NR_SWAPCACHE, nr_pages);
 
@@ -347,20 +347,24 @@ void __swap_cache_del_folio(swp_entry_t entry,
 			need_free = true;
 	} while (++offset < end);
 
-	folio->swap.val = 0;
-	folio_clear_swapcache(folio);
 	node_stat_mod_folio(folio, NR_FILE_PAGES, -nr_pages);
 	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr_pages);
 
 	if (!folio_swapped) {
-		__swap_free_entries(si, ci, start, nr_pages, !do_memsw_account());
+		__swap_free_entries(si, ci, start, nr_pages, 0);
+		mem_cgroup_uncharge_swap(folio, -1);
 	} else if (need_free) {
 		offset = start;
 		do {
-			if (!swp_te_get_count(__swap_table_get(ci, offset)))
-				__swap_free_entries(si, ci, offset, 1, !do_memsw_account());
+			if (!swp_te_get_count(__swap_table_get(ci, offset))) {
+				__swap_free_entries(si, ci, offset, 1, 0);
+				mem_cgroup_uncharge_swap(folio, offset - start);
+			}
 		} while (++offset < end);
 	}
+
+	folio->swap.val = 0;
+	folio_clear_swapcache(folio);
 }
 
 /* For huge page splitting, override an old folio with a smaller new one. */

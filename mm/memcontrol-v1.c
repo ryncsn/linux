@@ -659,7 +659,7 @@ void memcg1_swapout(struct folio *folio, swp_entry_t entry)
  * Note: This function assumes the page for which swap slot is being uncharged
  * is order 0 page.
  */
-void memcg1_swapin(swp_entry_t entry, unsigned int nr_pages)
+void memcg1_swapin(struct folio *folio)
 {
 	/*
 	 * Cgroup1's unified memory+swap counter has been charged with the
@@ -679,7 +679,7 @@ void memcg1_swapin(swp_entry_t entry, unsigned int nr_pages)
 		 * let's not wait for it.  The page already received a
 		 * memory+swap charge, drop the swap entry duplicate.
 		 */
-		mem_cgroup_uncharge_swap(entry, nr_pages);
+		mem_cgroup_uncharge_swap(folio, 0);
 	}
 }
 
