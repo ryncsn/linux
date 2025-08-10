@@ -154,47 +154,56 @@ static void __swap_cache_do_add_folio(swp_entry_t entry, struct swap_cluster_inf
  * @folio: folio to be added
  *
  * Returns the 0 on successes. Returns following error code on failure:
- * -EEXIST: conflicting cache exists, only possible for large folios
- *          when @entry is not cached but a follow-up entry is cached.
- * -ENOENT: @entry or a follow-up entry is freed already.
+ * -EEXIST: @target_entry is cached already.
+ * -ENOENT: @target_entry is freed already.
+ * -EAGAIN: Only for large folio. If any sub entry covered by this folio
+ *          is freed or cached, caller should shrink the order and retry.
  *
  * Caller must holds an reference of the swap device of @entry.
  */
-static int swap_cache_add_folio(swp_entry_t entry, struct folio *folio)
+static int swap_cache_add_folio(swp_entry_t target_entry, struct folio *folio)
 {
 	int err;
 	swp_te_t exist;
 	void *shadow = NULL;
-	pgoff_t end, start, offset;
+	swp_entry_t folio_entry;
 	struct swap_info_struct *si;
 	struct swap_cluster_info *ci;
+	pgoff_t end, start, offset, target_offset;
 	unsigned long nr_pages = folio_nr_pages(folio);
 
-	start = swp_offset(entry);
+	folio_entry.val = round_down(target_entry.val, nr_pages);
+	target_offset = swp_offset(target_entry);
+	start = swp_offset(folio_entry);
 	end = start + nr_pages;
 
 	offset = start;
-	si = swp_info(entry);
+	si = swp_info(target_entry);
+
 	ci = swap_lock_cluster(si, offset);
+	exist = __swap_table_get(ci, target_offset);
+	if (unlikely(swp_te_is_folio(exist))) {
+		err = -EEXIST;
+		goto fail;
+	} else if (unlikely(!swp_te_get_count(exist))) {
+		err = -ENOENT;
+		goto fail;
+	}
+	shadow = swp_te_shadow(exist);
 	do {
 		exist = __swap_table_get(ci, offset);
-		if (unlikely(swp_te_is_folio(exist))) {
-			err = -EEXIST;
+		if (unlikely(swp_te_is_folio(exist) || !swp_te_get_count(exist))) {
+			err = -EAGAIN;
 			goto fail;
 		}
-		if (!swp_te_get_count(exist)) {
-			err = -ENOENT;
-			goto fail;
-		}
-		shadow = swp_te_shadow(exist);
 	} while (++offset < end);
 
 	__folio_set_locked(folio);
 	__folio_set_swapbacked(folio);
-	__swap_cache_do_add_folio(entry, ci, folio);
+	__swap_cache_do_add_folio(folio_entry, ci, folio);
 	swap_unlock_cluster(ci);
 
-	memcg1_swapin(entry, nr_pages);
+	memcg1_swapin(folio_entry, nr_pages);
 
 	if (likely(xa_to_value(shadow)))
 		workingset_refault(folio, shadow);
@@ -420,22 +429,18 @@ void swap_update_readahead(struct folio *folio,
 	}
 }
 
-/*
- * Wrapper for swap_cache_add_folio that never returns -EEXIST
- * for order 0 folio.
- */
-static struct folio *swap_cache_add_or_get(swp_entry_t entry,
+/* Wrapper for swap_cache_add_folio that never returns -EEXIST. */
+static struct folio *swap_cache_add_or_get(swp_entry_t target_entry,
 					   struct folio *folio)
 {
-	int nr_pages = folio_nr_pages(folio);
 	struct folio *swapcache;
 	int err;
 
 again:
-	err = swap_cache_add_folio(entry, folio);
+	err = swap_cache_add_folio(target_entry, folio);
 	if (err) {
-		if (err == -EEXIST && nr_pages == 1) {
-			swapcache = swap_cache_get_folio(entry);
+		if (err == -EEXIST) {
+			swapcache = swap_cache_get_folio(target_entry);
 			if (swapcache)
 				return swapcache;
 			goto again;
@@ -528,10 +533,7 @@ out:
 struct folio *swapin_folio(swp_entry_t entry, struct folio *folio)
 {
 	struct folio *swapcache;
-	pgoff_t offset = swp_offset(entry);
-	unsigned long nr_pages = folio_nr_pages(folio);
 
-	entry = swp_entry(swp_type(entry), ALIGN_DOWN(offset, nr_pages));
 	swapcache = swap_cache_add_or_get(entry, folio);
 	if (swapcache == folio)
 		swap_read_folio(folio, NULL);
