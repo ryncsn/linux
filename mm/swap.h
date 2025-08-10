@@ -52,6 +52,29 @@ static inline pgoff_t swap_cache_index(swp_entry_t entry)
 	return swp_offset(entry) & SWAP_ADDRESS_SPACE_MASK;
 }
 
+/**
+ * folio_contains_swap - Does this folio contain this swap entry?
+ * @folio: The folio.
+ * @entry: The swap entry to check against.
+ *
+ * Swap version of folio_contains()
+ *
+ * Context: The caller should have the folio locked to ensure
+ * nothing will move it out of the swap cache.
+ * Return: true or false.
+ */
+static inline bool folio_contains_swap(struct folio *folio, swp_entry_t entry)
+{
+	pgoff_t offset = swp_offset(entry);
+
+	VM_WARN_ON_ONCE(!folio_test_locked(folio));
+	if (unlikely(!folio_test_swapcache(folio)))
+		return false;
+	if (unlikely(swp_type(entry) != swp_type(folio->swap)))
+		return false;
+	return offset - swp_offset(folio->swap) < folio_nr_pages(folio);
+}
+
 void show_swap_cache_info(void);
 void *get_shadow_from_swap_cache(swp_entry_t entry);
 int add_to_swap_cache(struct folio *folio, swp_entry_t entry,
@@ -142,6 +165,11 @@ static inline struct address_space *swap_address_space(swp_entry_t entry)
 static inline pgoff_t swap_cache_index(swp_entry_t entry)
 {
 	return 0;
+}
+
+static inline bool folio_contains_swap(struct folio *folio, swp_entry_t entry)
+{
+	return false;
 }
 
 static inline void show_swap_cache_info(void)
