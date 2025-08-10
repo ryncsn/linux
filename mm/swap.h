@@ -137,6 +137,13 @@ static inline void swap_unlock_cluster_irq(struct swap_cluster_info *ci)
 	spin_unlock_irq(&ci->lock);
 }
 
+extern int __swap_cache_set_entry(struct swap_info_struct *si,
+				  struct swap_cluster_info *ci,
+				  unsigned long offset);
+extern void __swap_cache_put_entries(struct swap_info_struct *si,
+				     struct swap_cluster_info *ci,
+				     swp_entry_t entry, unsigned int size);
+
 /* linux/mm/page_io.c */
 int sio_pool_init(void);
 struct swap_iocb;
@@ -161,11 +168,11 @@ static inline struct address_space *swap_address_space(swp_entry_t entry)
 /* Below helpers requires the caller to pin the swap device. */
 extern struct folio *swap_cache_get_folio(swp_entry_t entry);
 extern void *swap_cache_get_shadow(swp_entry_t entry);
-extern int swap_cache_add_folio(swp_entry_t entry,
-				struct folio *folio, void **shadow);
-struct folio *swap_cache_alloc_folio(swp_entry_t entry, gfp_t gfp_flags,
-				     struct mempolicy *mpol, pgoff_t ilx,
-				     bool *alloced, bool skip_if_exists);
+extern int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
+				void **shadow, bool swapin);
+extern struct folio *swap_cache_alloc_folio(swp_entry_t entry, gfp_t gfp_flags,
+					    struct mempolicy *mpol, pgoff_t ilx,
+					    bool *alloced);
 extern void swap_cache_del_folio(struct folio *folio);
 /* Below helpers requires the caller to lock the swap cluster. */
 extern void __swap_cache_del_folio(swp_entry_t entry,
@@ -337,7 +344,8 @@ static inline void *swap_cache_get_shadow(swp_entry_t end)
 	return NULL;
 }
 
-static inline int swap_cache_add_folio(swp_entry_t end, struct folio *folio, void **shadow)
+static inline int swap_cache_add_folio(swp_entry_t end, struct folio *folio,
+				       void **shadow, bool swapin)
 {
 	return -EINVAL;
 }
