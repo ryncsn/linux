@@ -656,8 +656,8 @@ static inline int mem_cgroup_charge(struct folio *folio, struct mm_struct *mm,
 
 int mem_cgroup_charge_hugetlb(struct folio* folio, gfp_t gfp);
 
-int mem_cgroup_swapin_charge_folio(struct folio *folio,
-				   gfp_t gfp, swp_entry_t entry);
+int mem_cgroup_swapin_charge_folio(struct folio *folio, gfp_t gfp,
+				   swp_entry_t entry, unsigned short memcg_id);
 
 void __mem_cgroup_uncharge(struct folio *folio);
 
@@ -1155,8 +1155,8 @@ static inline int mem_cgroup_charge_hugetlb(struct folio* folio, gfp_t gfp)
         return 0;
 }
 
-static inline int mem_cgroup_swapin_charge_folio(struct folio *folio,
-						 gfp_t gfp, swp_entry_t entry)
+static inline int mem_cgroup_swapin_charge_folio(struct folio *folio, gfp_t gfp,
+				   swp_entry_t entry, unsigned short memcg_id);
 {
 	return 0;
 }

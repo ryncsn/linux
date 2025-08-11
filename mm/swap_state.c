@@ -204,14 +204,11 @@ struct folio *swap_cache_alloc_folio(swp_entry_t target_entry, gfp_t gfp_mask,
 				     struct mempolicy *mpol, pgoff_t ilx)
 {
 	gfp_t gfp;
-	void *shadow;
 	int err, order = 0;
 	struct folio *folio;
 	unsigned long address;
+	void *shadow, *shadow_check;
 	struct swap_cluster_info *ci;
-
-	ci = swp_cluster(target_entry);
-	order = orders ? highest_order(orders) : 0;
 
 	/*
 	 * If uffd is active for the vma we need per-page fault fidelity to
@@ -223,6 +220,7 @@ struct folio *swap_cache_alloc_folio(swp_entry_t target_entry, gfp_t gfp_mask,
 	    zswap_never_enabled())
 		order = highest_order(orders);
 
+	ci = swp_cluster(target_entry);
 	for (;;) {
 		unsigned long nr_pages = 1 << order;
 		swp_entry_t folio_entry = { .val = round_down(target_entry.val, nr_pages) };
@@ -231,7 +229,7 @@ struct folio *swap_cache_alloc_folio(swp_entry_t target_entry, gfp_t gfp_mask,
 		spin_lock(&ci->lock);
 		err = __swap_cache_check_exist(target_entry, ci, nr_pages, &shadow);
 		spin_unlock(&ci->lock);
-		if (err)
+		if (unlikely(err))
 			goto fallback;
 
 		if (order && vmf)
@@ -250,7 +248,8 @@ struct folio *swap_cache_alloc_folio(swp_entry_t target_entry, gfp_t gfp_mask,
 			goto fallback;
 		}
 
-		if (mem_cgroup_swapin_charge_folio(folio, gfp_mask, target_entry)) {
+		if (mem_cgroup_swapin_charge_folio(folio, gfp_mask, target_entry,
+						   shadow_memcgid(shadow))) {
 			folio_put(folio);
 			count_mthp_stat(order, MTHP_STAT_SWPIN_FALLBACK_CHARGE);
 			err = -ENOMEM;
@@ -259,12 +258,19 @@ struct folio *swap_cache_alloc_folio(swp_entry_t target_entry, gfp_t gfp_mask,
 
 		/* Double check the range is still not in conflict */
 		spin_lock(&ci->lock);
-		err = __swap_cache_check_exist(target_entry, ci, nr_pages, &shadow);
+		err = __swap_cache_check_exist(target_entry, ci, nr_pages, &shadow_check);
 		if (unlikely(err)) {
 			spin_unlock(&ci->lock);
 			folio_put(folio);
 			goto fallback;
 		}
+
+		if (shadow_check != shadow) {
+			spin_unlock(&ci->lock);
+			folio_put(folio);
+			continue;
+		}
+
 		__folio_set_locked(folio);
 		__folio_set_swapbacked(folio);
 		__swap_cache_do_add_folio(folio_entry, ci, folio);
@@ -282,7 +288,7 @@ struct folio *swap_cache_alloc_folio(swp_entry_t target_entry, gfp_t gfp_mask,
 
 		return folio;
 fallback:
-		if (err != -ENOMEM || err != -EAGAIN || !order)
+		if ((err != -ENOMEM && err != -EAGAIN) || !order)
 			return ERR_PTR(err);
 
 		count_mthp_stat(order, MTHP_STAT_SWPIN_FALLBACK);

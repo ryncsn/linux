@@ -4766,18 +4766,18 @@ out:
  * Returns 0 on success. Otherwise, an error code is returned.
  */
 int mem_cgroup_swapin_charge_folio(struct folio *folio, gfp_t gfp,
-				   swp_entry_t entry)
+				   swp_entry_t entry, unsigned short memcgid)
 {
 	struct mem_cgroup *memcg;
-	unsigned short id;
 	int ret;
 
 	if (mem_cgroup_disabled())
 		return 0;
 
-	id = lookup_swap_cgroup_id(entry);
+	WARN_ON_ONCE(memcgid != lookup_swap_cgroup_id(entry));
+
 	rcu_read_lock();
-	memcg = mem_cgroup_from_id(id);
+	memcg = mem_cgroup_from_id(memcgid);
 	if (!memcg || !css_tryget_online(&memcg->css))
 		memcg = get_mem_cgroup_from_current();
 	rcu_read_unlock();
