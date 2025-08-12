@@ -316,8 +316,8 @@ void __swap_cache_add_folio(swp_entry_t entry, struct swap_cluster_info *ci,
  * be in the swap cache and locked. It will never put the folio
  * into the free list, the caller has a reference on the folio.
  */
-void __swap_cache_del_folio(swp_entry_t entry,
-			    struct folio *folio, void *shadow)
+static void __swap_cache_do_del_folio(swp_entry_t entry,
+				      struct folio *folio, void *shadow)
 {
 	swp_te_t exist;
 	pgoff_t offset, start, end;
@@ -347,9 +347,6 @@ void __swap_cache_del_folio(swp_entry_t entry,
 			need_free = true;
 	} while (++offset < end);
 
-	node_stat_mod_folio(folio, NR_FILE_PAGES, -nr_pages);
-	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr_pages);
-
 	if (!folio_swapped) {
 		__swap_free_entries(si, ci, start, nr_pages, 0);
 		mem_cgroup_uncharge_swap(folio, -1);
@@ -365,6 +362,16 @@ void __swap_cache_del_folio(swp_entry_t entry,
 
 	folio->swap.val = 0;
 	folio_clear_swapcache(folio);
+}
+
+void __swap_cache_del_folio(swp_entry_t entry,
+			    struct folio *folio, void *shadow)
+{
+	long nr_pages = folio_nr_pages(folio);
+
+	__swap_cache_do_del_folio(entry, folio, shadow);
+	__node_stat_mod_folio(folio, NR_FILE_PAGES, -nr_pages);
+	__lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr_pages);
 }
 
 /* For huge page splitting, override an old folio with a smaller new one. */
@@ -406,10 +413,14 @@ void swap_cache_del_folio(struct folio *folio)
 {
 	struct swap_cluster_info *ci;
 	swp_entry_t entry = folio->swap;
+	long nr_pages = folio_nr_pages(folio);
 
 	ci = swap_lock_cluster(swp_info(entry), swp_offset(entry));
-	__swap_cache_del_folio(entry, folio, NULL);
+	__swap_cache_do_del_folio(entry, folio, NULL);
 	swap_unlock_cluster(ci);
+
+	node_stat_mod_folio(folio, NR_FILE_PAGES, -nr_pages);
+	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr_pages);
 
 	folio_ref_sub(folio, folio_nr_pages(folio));
 }
