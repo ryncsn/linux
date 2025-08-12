@@ -4872,7 +4872,7 @@ check_folio:
 	vmf->orig_pte = pte_advance_pfn(pte, page_idx);
 
 	/* ksm created a completely new copy */
-	if (unlikely(folio != swapcache && swapcache)) {
+	if (unlikely(folio != swapcache)) {
 		folio_add_new_anon_rmap(folio, vma, address, RMAP_EXCLUSIVE);
 		folio_add_lru_vma(folio, vma);
 		folio_put_swap(swapcache, NULL);
@@ -4902,7 +4902,7 @@ check_folio:
 		folio_free_swap(folio);
 	folio_unlock(folio);
 
-	if (folio != swapcache && swapcache) {
+	if (folio != swapcache) {
 		/*
 		 * Hold the lock to avoid the swap entry to be reused
 		 * until we take the PT lock for the pte_same() check
