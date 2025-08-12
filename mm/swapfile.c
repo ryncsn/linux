@@ -51,8 +51,7 @@
 #include "swap_table.h"
 #include "swap.h"
 
-static void swap_range_alloc(struct swap_info_struct *si,
-			     unsigned int nr_entries);
+static bool swap_usage_add(struct swap_info_struct *si, unsigned int nr);
 static bool folio_swapcache_freeable(struct folio *folio);
 
 static DEFINE_SPINLOCK(swap_lock);
@@ -826,7 +825,6 @@ static bool cluster_alloc_range(struct swap_info_struct *si,
 	if (!(si->flags & SWP_WRITEOK))
 		return false;
 
-	swap_range_alloc(si, nr_pages);
 	ci->count += nr_pages;
 
 	if (likely(folio)) {
@@ -837,6 +835,12 @@ static bool cluster_alloc_range(struct swap_info_struct *si,
 		VM_WARN_ON_ONCE(swap_cache_check_folio(entry));
 		__swap_table_set(ci, offset, swp_te_set_count(null_swp_te(), 1));
 	}
+
+	if (swap_usage_add(si, nr_pages)) {
+		if (vm_swap_full())
+			schedule_work(&si->reclaim_work);
+	}
+	atomic_long_sub(nr_pages, &nr_swap_pages);
 
 	return true;
 }
@@ -1207,16 +1211,6 @@ static void swap_usage_sub(struct swap_info_struct *si, unsigned int nr_entries)
 	 */
 	if (unlikely(val & SWAP_USAGE_OFFLIST_BIT))
 		add_to_avail_list(si, false);
-}
-
-static void swap_range_alloc(struct swap_info_struct *si,
-			     unsigned int nr_entries)
-{
-	if (swap_usage_add(si, nr_entries)) {
-		if (vm_swap_full())
-			schedule_work(&si->reclaim_work);
-	}
-	atomic_long_sub(nr_entries, &nr_swap_pages);
 }
 
 static void swap_range_free(struct swap_info_struct *si, unsigned long offset,
