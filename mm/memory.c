@@ -1744,7 +1744,7 @@ static inline int zap_nonpresent_ptes(struct mmu_gather *tlb,
 		if (!should_zap_cows(details))
 			return 1;
 
-		nr = swap_pte_batch(pte, max_nr, ptent);
+		nr = swap_pte_batch(pte, max_nr, ptent, true);
 		rss[MM_SWAPENTS] -= nr;
 		do_put_swap_entries(entry, nr);
 	} else if (is_migration_entry(entry)) {
@@ -4424,9 +4424,10 @@ static vm_fault_t handle_pte_marker(struct vm_fault *vmf)
  * @nr_pages: Number of pages of the folio that suppose to be swapped in.
  */
 static bool can_swapin_thp(struct vm_fault *vmf, pte_t *ptep,
-			   unsigned long addr, unsigned int nr_pages)
+			   unsigned long addr, unsigned int nr_pages,
+			   bool locked)
 {
-	pte_t pte = ptep_get(ptep);
+	pte_t pte = ptep_get_lockless(ptep);
 	unsigned long addr_end = addr + (PAGE_SIZE * nr_pages);
 	unsigned long pte_offset = (vmf->address - addr) / PAGE_SIZE;
 
@@ -4439,12 +4440,12 @@ static bool can_swapin_thp(struct vm_fault *vmf, pte_t *ptep,
 	if (unlikely(addr < max(vmf->address & PMD_MASK, vmf->vma->vm_start) ||
 		     addr_end > pmd_addr_end(vmf->address, vmf->vma->vm_end)))
 		return false;
-	/*
+	/*locked
 	 * All swap entries must from the same swap device, in same
 	 * cgroup, with same exclusiveness, only differs in offset.
 	 */
 	if (!pte_same(pte, pte_move_swp_offset(vmf->orig_pte, -pte_offset)) ||
-	    swap_pte_batch(ptep, nr_pages, pte) != nr_pages)
+	    swap_pte_batch(ptep, nr_pages, pte, locked) != nr_pages)
 		return false;
 
 	return true;
@@ -4473,13 +4474,12 @@ static inline unsigned long thp_swap_suitable_orders(pgoff_t swp_offset,
 	return orders;
 }
 
-static unsigned long thp_swapin_suiltable_orders(struct vm_fault *vmf)
+static unsigned long thp_swapin_suiltable_orders(struct vm_fault *vmf,
+						 swp_entry_t entry)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	unsigned long orders;
 	unsigned long addr;
-	swp_entry_t entry;
-	spinlock_t *ptl;
 	pte_t *pte;
 	int order;
 
@@ -4487,7 +4487,6 @@ static unsigned long thp_swapin_suiltable_orders(struct vm_fault *vmf)
 	 * Get a list of all the (large) orders below PMD_ORDER that are enabled
 	 * and suitable for swapping THP.
 	 */
-	entry = pte_to_swp_entry(vmf->orig_pte);
 	orders = thp_vma_allowable_orders(vma, vma->vm_flags,
 			TVA_IN_PF | TVA_ENFORCE_SYSFS, BIT(PMD_ORDER) - 1);
 	orders = thp_vma_suitable_orders(vma, vmf->address, orders);
@@ -4497,8 +4496,7 @@ static unsigned long thp_swapin_suiltable_orders(struct vm_fault *vmf)
 	if (!orders)
 		return 0;
 
-	pte = pte_offset_map_lock(vmf->vma->vm_mm, vmf->pmd,
-				  vmf->address & PMD_MASK, &ptl);
+	pte = pte_offset_map(vmf->pmd, vmf->address & PMD_MASK);
 	if (unlikely(!pte))
 		return 0;
 
@@ -4511,14 +4509,14 @@ static unsigned long thp_swapin_suiltable_orders(struct vm_fault *vmf)
 		unsigned long nr_pages = 1 << order;
 		swp_entry_t swap_entry = { .val = ALIGN_DOWN(entry.val, nr_pages) };
 		addr = ALIGN_DOWN(vmf->address, nr_pages * PAGE_SIZE);
-		if (!can_swapin_thp(vmf, pte + pte_index(addr), addr, nr_pages))
+		if (!can_swapin_thp(vmf, pte + pte_index(addr), addr, nr_pages, false))
 			continue;
 		/* Zero map doesn't work with large folio yet. */
 		if (unlikely(swap_zeromap_batch(swap_entry, nr_pages, NULL) != nr_pages))
 			continue;
 		break;
 	}
-	pte_unmap_unlock(pte, ptl);
+	pte_unmap(pte);
 
 	return orders;
 }
@@ -4529,7 +4527,8 @@ static bool can_swapin_thp(struct vm_fault *vmf, pte_t *ptep,
 	return false;
 }
 
-static unsigned long thp_swapin_suiltable_orders(struct vm_fault *vmf)
+static unsigned long thp_swapin_suiltable_orders(struct vm_fault *vmf,
+						 swp_entry_t entry)
 {
 	return 0;
 }
@@ -4654,7 +4653,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	if (!folio) {
 		if (data_race(si->flags & SWP_SYNCHRONOUS_IO)) {
 			folio = swapin_entry(entry, GFP_HIGHUSER_MOVABLE,
-					     thp_swapin_suiltable_orders(vmf),
+					     thp_swapin_suiltable_orders(vmf, entry),
 					     vmf, NULL, 0);
 		} else {
 			folio = swapin_readahead(entry, GFP_HIGHUSER_MOVABLE, vmf);
@@ -4760,7 +4759,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 		unsigned long folio_address = vmf->address - idx * PAGE_SIZE;
 		pte_t *folio_ptep = vmf->pte - idx;
 
-		if (can_swapin_thp(vmf, folio_ptep, folio_address, nr)) {
+		if (can_swapin_thp(vmf, folio_ptep, folio_address, nr, true)) {
 			page_idx = idx;
 			address = folio_address;
 			ptep = folio_ptep;

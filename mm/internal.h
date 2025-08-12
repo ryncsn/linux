@@ -377,7 +377,8 @@ static inline pte_t pte_next_swp_offset(pte_t pte)
  *
  * Return: the number of table entries in the batch.
  */
-static inline int swap_pte_batch(pte_t *start_ptep, int max_nr, pte_t pte)
+static inline int swap_pte_batch(pte_t *start_ptep, int max_nr,
+				 pte_t pte, bool locked)
 {
 	pte_t expected_pte = pte_next_swp_offset(pte);
 	const pte_t *end_ptep = start_ptep + max_nr;
@@ -389,7 +390,7 @@ static inline int swap_pte_batch(pte_t *start_ptep, int max_nr, pte_t pte)
 	VM_WARN_ON(non_swap_entry(entry));
 
 	while (ptep < end_ptep) {
-		pte = ptep_get(ptep);
+		pte = locked ? ptep_get(ptep) : ptep_get_lockless(ptep);
 
 		if (!pte_same(pte, expected_pte))
 			break;
