@@ -811,10 +811,10 @@ static bool cluster_scan_range(struct swap_info_struct *si,
 	return true;
 }
 
-static bool cluster_alloc_range(struct swap_info_struct *si,
-				struct swap_cluster_info *ci,
-				struct folio *folio,
-				unsigned int offset)
+static bool __swap_cluster_alloc_range(struct swap_info_struct *si,
+				       struct swap_cluster_info *ci,
+				       struct folio *folio,
+				       unsigned int offset)
 {
 	unsigned int order = folio ? folio_order(folio) : 0;
 	swp_entry_t entry = swp_entry(si->type, offset);
@@ -883,7 +883,7 @@ static long alloc_swap_scan_cluster(struct swap_info_struct *si,
 			if (!ret)
 				continue;
 		}
-		if (!cluster_alloc_range(si, ci, folio, offset))
+		if (!__swap_cluster_alloc_range(si, ci, folio, offset))
 			break;
 		found = offset;
 		offset += nr_pages;
@@ -1211,43 +1211,6 @@ static void swap_usage_sub(struct swap_info_struct *si, unsigned int nr_entries)
 	 */
 	if (unlikely(val & SWAP_USAGE_OFFLIST_BIT))
 		add_to_avail_list(si, false);
-}
-
-static void swap_range_free(struct swap_info_struct *si, unsigned long offset,
-			    unsigned int nr_entries)
-{
-	unsigned long end = offset + nr_entries - 1;
-	void (*swap_slot_free_notify)(struct block_device *, unsigned long);
-	unsigned int i;
-
-	/*
-	 * Use atomic clear_bit operations only on zeromap instead of non-atomic
-	 * bitmap_clear to prevent adjacent bits corruption due to simultaneous writes.
-	 */
-	for (i = 0; i < nr_entries; i++) {
-		clear_bit(offset + i, si->zeromap);
-		zswap_invalidate(swp_entry(si->type, offset + i));
-	}
-
-	if (si->flags & SWP_BLKDEV)
-		swap_slot_free_notify =
-			si->bdev->bd_disk->fops->swap_slot_free_notify;
-	else
-		swap_slot_free_notify = NULL;
-	while (offset <= end) {
-		arch_swap_invalidate_page(si->type, offset);
-		if (swap_slot_free_notify)
-			swap_slot_free_notify(si->bdev, offset);
-		offset++;
-	}
-
-	/*
-	 * Make sure that try_to_unuse() observes si->inuse_pages reaching 0
-	 * only after the above cleanups are done.
-	 */
-	smp_wmb();
-	atomic_long_add(nr_entries, &nr_swap_pages);
-	swap_usage_sub(si, nr_entries);
 }
 
 static bool get_swap_device_info(struct swap_info_struct *si)
@@ -1746,28 +1709,55 @@ void __swap_free_entries(struct swap_info_struct *si,
 {
 	swp_entry_t entry = swp_entry(si->type, start);
 	unsigned long offset = start, end = start + nr_pages;
+	void (*swap_slot_free_notify)(struct block_device *, unsigned long);
 
 	/* It should never free entries across different clusters */
 	VM_BUG_ON(ci != swp_offset_cluster(si, offset + nr_pages - 1));
 	VM_BUG_ON(cluster_is_empty(ci));
 	VM_BUG_ON(ci->count < nr_pages);
 
-	swap_range_free(si, start, nr_pages);
-	ci->count -= nr_pages;
-	do {
-		swp_te_t swp_te = __swap_table_get(ci, offset);
+	if (si->flags & SWP_BLKDEV)
+		swap_slot_free_notify =
+			si->bdev->bd_disk->fops->swap_slot_free_notify;
+	else
+		swap_slot_free_notify = NULL;
 
-		VM_WARN_ON_ONCE(swp_te_get_count(swp_te) > 1 || swp_te_is_folio(swp_te));
+	/*
+	 * Use atomic clear_bit operations only on zeromap instead of non-atomic
+	 * bitmap_clear to prevent adjacent bits corruption due to simultaneous writes.
+	 */
+	do {
+		if (IS_ENABLED(CONFIG_DEBUG_VM)) {
+			swp_te_t swp_te = __swap_table_get(ci, offset);
+			WARN_ON_ONCE(swp_te_get_count(swp_te));
+			WARN_ON_ONCE(swp_te_is_folio(swp_te));
+		}
+
+		clear_bit(offset, si->zeromap);
+		zswap_invalidate(swp_entry(si->type, offset));
+		arch_swap_invalidate_page(si->type, offset);
+		if (swap_slot_free_notify)
+			swap_slot_free_notify(si->bdev, offset);
+
 		__swap_table_set(ci, offset, null_swp_te());
 	} while (++offset < end);
 
 	if (memcgid)
 		mem_cgroup_uncharge_swap_entries(entry, nr_pages, memcgid);
 
+	ci->count -= nr_pages;
 	if (!ci->count)
 		free_cluster(si, ci);
 	else
 		partial_free_cluster(si, ci);
+
+	/*
+	 * Make sure that try_to_unuse() observes si->inuse_pages reaching 0
+	 * only after the above cleanups are done.
+	 */
+	smp_wmb();
+	atomic_long_add(nr_pages, &nr_swap_pages);
+	swap_usage_sub(si, nr_pages);
 }
 
 int __swap_count(swp_entry_t entry)
