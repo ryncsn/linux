@@ -208,7 +208,6 @@ enum {
 	SWP_DISCARDABLE = (1 << 2),	/* blkdev support discard */
 	SWP_DISCARDING	= (1 << 3),	/* now discarding a free cluster */
 	SWP_SOLIDSTATE	= (1 << 4),	/* blkdev seeks are cheap */
-	SWP_CONTINUED	= (1 << 5),	/* swap_map has count continuation */
 	SWP_BLKDEV	= (1 << 6),	/* its a block device */
 	SWP_ACTIVATED	= (1 << 7),	/* set after swap_activate success */
 	SWP_FS_OPS	= (1 << 8),	/* swapfile operations go through fs */
@@ -222,9 +221,6 @@ enum {
 #define SWAP_CLUSTER_MAX 32UL
 #define SWAP_CLUSTER_MAX_SKIPPED (SWAP_CLUSTER_MAX << 10)
 #define COMPACT_CLUSTER_MAX SWAP_CLUSTER_MAX
-
-/* Bit flag in swap_map */
-#define COUNT_CONTINUED	0x80	/* Flag swap_map continuation for full count */
 
 /* Special value in first swap_map */
 #define SWAP_MAP_MAX	0x3e	/* Max count */
@@ -264,8 +260,7 @@ struct swap_info_struct {
 	signed short	prio;		/* swap priority of this type */
 	struct plist_node list;		/* entry in swap_active_head */
 	signed char	type;		/* strange name for an index */
-	unsigned int	max;		/* extent of the swap_map */
-	unsigned char *swap_map;	/* vmalloc'ed array of usage counts */
+	unsigned int	max;		/* size of this swap device */
 	unsigned long *zeromap;		/* kvmalloc'ed bitmap to track zero pages */
 	struct swap_cluster_info *cluster_info; /* cluster info. Only for SSD */
 	struct list_head free_clusters; /* free clusters list */
@@ -284,8 +279,8 @@ struct swap_info_struct {
 	struct completion comp;		/* seldom referenced */
 	spinlock_t lock;		/*
 					 * protect map scan related fields like
-					 * swap_map, inuse_pages and all cluster
-					 * lists. other fields are only changed
+					 * inuse_pages and all cluster lists.
+					 * Other fields are only changed
 					 * at swapon/swapoff, so are protected
 					 * by swap_lock. changing flags need
 					 * hold this lock and swap_lock. If
@@ -451,7 +446,6 @@ static inline long get_nr_swap_pages(void)
 
 extern void si_swapinfo(struct sysinfo *);
 void put_swap_folio(struct folio *folio, swp_entry_t entry);
-extern int add_swap_count_continuation(swp_entry_t, gfp_t);
 int swap_type_of(dev_t device, sector_t offset);
 int find_first_swap(dev_t *device);
 extern unsigned int count_swap_pages(int, int);
@@ -513,11 +507,6 @@ static inline void put_swap_device(struct swap_info_struct *si)
 
 static inline void free_swap_cache(struct folio *folio)
 {
-}
-
-static inline int add_swap_count_continuation(swp_entry_t swp, gfp_t gfp_mask)
-{
-	return 0;
 }
 
 static inline int do_dup_swap_entry(swp_entry_t ent)

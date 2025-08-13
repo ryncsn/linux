@@ -182,7 +182,7 @@ static int swap_cache_add_folio(swp_entry_t entry, struct folio *folio)
 			err = -EEXIST;
 			goto fail;
 		}
-		if (!__swap_count(swp_entry(si->type, offset))) {
+		if (!swp_te_get_count(exist)) {
 			err = -ENOENT;
 			goto fail;
 		}
@@ -255,7 +255,7 @@ void __swap_cache_del_folio(swp_entry_t entry,
 		VM_WARN_ON_ONCE(swp_te_folio(exist) != folio);
 		/* If shadow is NULL, we sets an empty shadow */
 		__swap_table_set_shadow(ci, offset, shadow);
-		if (__swap_count(swp_entry(si->type, offset)))
+		if (swp_te_get_count(exist))
 			folio_swapped = true;
 		else
 			need_free = true;
@@ -271,7 +271,7 @@ void __swap_cache_del_folio(swp_entry_t entry,
 	} else if (need_free) {
 		offset = start;
 		do {
-			if (!__swap_count(swp_entry(si->type, offset)))
+			if (!swp_te_get_count(__swap_table_get(ci, offset)))
 				__swap_free_entries(si, ci, offset, 1);
 		} while (++offset < end);
 	}
@@ -322,19 +322,6 @@ void swap_cache_del_folio(struct folio *folio)
 	swap_unlock_cluster(ci);
 
 	folio_ref_sub(folio, folio_nr_pages(folio));
-}
-
-void __swap_cache_clear_shadow(swp_entry_t entry, int nr_ents)
-{
-	struct swap_cluster_info *ci;
-	pgoff_t offset = swp_offset(entry), end;
-
-	ci = swp_offset_cluster(swp_info(entry), offset);
-	end = offset + nr_ents;
-	do {
-		WARN_ON_ONCE(swp_te_is_folio(__swap_table_get(ci, offset)));
-		__swap_table_set_null(ci, offset);
-	} while (++offset < end);
 }
 
 /*
