@@ -147,10 +147,20 @@ static void __swap_cache_do_add_folio(swp_entry_t entry, struct swap_cluster_inf
 }
 
 /*
- * Try insert a folio for one or more swap-outed entry.
+ * Try to add a folio to the swap cache for a set of swap slots before
+ * doing IO (swap in or out). All swap slots covered by this folio must
+ * all have a non-zero swap count.
+ * @entry: swap entry indicating the slot
+ * @folio: folio to be added
+ *
+ * Returns the 0 on successes. Returns following error code on failure:
+ * -EEXIST: conflicting cache exists, only possible for large folios
+ *          when @entry is not cached but a follow-up entry is cached.
+ * -ENOENT: @entry or a follow-up entry is freed already.
+ *
+ * Caller must holds an reference of the swap device of @entry.
  */
-int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
-			 void **shadowp)
+static int swap_cache_add_folio(swp_entry_t entry, struct folio *folio)
 {
 	int err;
 	swp_te_t exist;
@@ -179,14 +189,22 @@ int swap_cache_add_folio(swp_entry_t entry, struct folio *folio,
 		shadow = swp_te_shadow(exist);
 	} while (++offset < end);
 
+	__folio_set_locked(folio);
+	__folio_set_swapbacked(folio);
 	__swap_cache_do_add_folio(entry, ci, folio);
 	swap_unlock_cluster(ci);
+
+	memcg1_swapin(entry, nr_pages);
+
+	if (likely(xa_to_value(shadow)))
+		workingset_refault(folio, shadow);
+
+	/* Caller will initiate read into locked folio */
+	folio_add_lru(folio);
 
 	node_stat_mod_folio(folio, NR_FILE_PAGES, nr_pages);
 	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, nr_pages);
 
-	if (shadowp)
-		*shadowp = shadow;
 	return 0;
 fail:
 	swap_unlock_cluster(ci);
@@ -416,51 +434,28 @@ void swap_update_readahead(struct folio *folio,
 }
 
 /*
- * Try to add a folio to the swap cache for a set of swap slots before
- * doing IO (swap in or out). All swap slots covered by this folio must
- * all have a non-zero swap count (swapped out).
- * @folio: folio to be added
- *
- * Returns the folio being added on successes. Returns the existing
- * folio if @entry is cached. Returns following error code on failure:
- * -EEXIST: A conflicting cached folio exists. Only possible with a
- *          large folio. Large swapin needs to handle race in swap
- *          cache differently.
- * -ENOENT: @entry or a follow-up entry is freed already.
- *
- * Caller must hold a reference to the swap device of @entry.
+ * Wrapper for swap_cache_add_folio that never returns -EEXIST
+ * for order 0 folio.
  */
 static struct folio *swap_cache_add_or_get(swp_entry_t entry,
 					   struct folio *folio)
 {
 	int nr_pages = folio_nr_pages(folio);
 	struct folio *swapcache;
-	void *shadow = NULL;
 	int err;
 
-	__folio_set_locked(folio);
-	__folio_set_swapbacked(folio);
 again:
-	err = swap_cache_add_folio(entry, folio, &shadow);
+	err = swap_cache_add_folio(entry, folio);
 	if (err) {
 		if (err == -EEXIST && nr_pages == 1) {
 			swapcache = swap_cache_get_folio(entry);
-			if (swapcache) {
-				folio_unlock(folio);
+			if (swapcache)
 				return swapcache;
-			}
 			goto again;
 		}
-		folio_unlock(folio);
 		return ERR_PTR(err);
 	}
 
-	memcg1_swapin(entry, nr_pages);
-	if (shadow)
-		workingset_refault(folio, shadow);
-
-	/* Caller will initiate read into locked folio */
-	folio_add_lru(folio);
 	return folio;
 }
 
