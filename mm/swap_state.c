@@ -138,6 +138,7 @@ static int __swap_cache_check_exist(swp_entry_t target_entry,
 	if (unlikely(!swp_te_get_count(exist)))
 		return -ENOENT;
 	*shadow = swp_te_shadow(exist);
+
 	if (nr_pages == 1)
 		return 0;
 
@@ -349,13 +350,13 @@ static void __swap_cache_do_del_folio(swp_entry_t entry,
 
 	if (!folio_swapped) {
 		__swap_free_entries(si, ci, start, nr_pages, 0);
-		mem_cgroup_uncharge_swap(folio, -1);
+		mem_cgroup_uncharge_swap(folio, 0);
 	} else if (need_free) {
 		offset = start;
 		do {
 			if (!swp_te_get_count(__swap_table_get(ci, offset))) {
 				__swap_free_entries(si, ci, offset, 1, 0);
-				mem_cgroup_uncharge_swap(folio, offset - start);
+				mem_cgroup_uncharge_swap(folio, 1);
 			}
 		} while (++offset < end);
 	}
@@ -422,7 +423,7 @@ void swap_cache_del_folio(struct folio *folio)
 	node_stat_mod_folio(folio, NR_FILE_PAGES, -nr_pages);
 	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr_pages);
 
-	folio_ref_sub(folio, folio_nr_pages(folio));
+	folio_ref_sub(folio, nr_pages);
 }
 
 /*

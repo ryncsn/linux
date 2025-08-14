@@ -235,12 +235,11 @@ static inline void __swap_table_set_folio(struct swap_cluster_info *ci, pgoff_t 
 					  struct folio *folio)
 {
 	swp_te_t swp_te;
-	unsigned char flags;
 
 	swp_te = __swap_table_get(ci, off);
-	flags = swp_te_get_flags(swp_te);
-	swp_te = swp_te_set_flags(folio_swp_te(folio), flags);
-
+	swp_te.counter &= SWP_TE_FLAGS_MASK;
+	swp_te.counter |= (folio_pfn(folio) << SWP_TE_PFN_SHIFT);
+	swp_te.counter |= SWP_TE_PFN_MARK;
 	__swap_table_set(ci, off, swp_te);
 }
 
@@ -248,12 +247,10 @@ static inline void __swap_table_set_shadow(struct swap_cluster_info *ci, pgoff_t
 					   void *shadow)
 {
 	swp_te_t swp_te;
-	unsigned char flags;
 
 	swp_te = __swap_table_get(ci, off);
-	flags = swp_te_get_flags(swp_te);
-	swp_te = swp_te_set_flags(shadow_swp_te(shadow), flags);
-
+	swp_te.counter &= SWP_TE_FLAGS_MASK;
+	swp_te.counter |= (unsigned long)shadow | SWP_TE_SHADOW_MARK;
 	__swap_table_set(ci, off, swp_te);
 }
 

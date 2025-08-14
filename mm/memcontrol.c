@@ -5193,21 +5193,15 @@ void __mem_cgroup_uncharge_swap_entries(swp_entry_t entry,
  * @entry: swap entry to uncharge
  * @nr_pages: the amount of swap space to uncharge
  */
-void __mem_cgroup_uncharge_swap(struct folio *folio, int nr_subpage)
+void __mem_cgroup_uncharge_swap(struct folio *folio, int nr_pages)
 {
-	long nr_pages = nr_subpage < 0 ? folio_nr_pages(folio) : 1;
-	swp_entry_t entry = folio->swap;
 	struct mem_cgroup *memcg;
 
 	memcg = folio_memcg(folio);
+	nr_pages = nr_pages ? nr_pages : folio_nr_pages(folio);
 
 	VM_WARN_ON_ONCE_FOLIO(!memcg, folio);
 	VM_WARN_ON_ONCE_FOLIO(!folio_test_locked(folio), folio);
-
-	if (nr_subpage > 0) {
-		pr_err("Error\n");
-		entry.val += nr_subpage;
-	}
 
 	if (memcg) {
 		if (!mem_cgroup_is_root(memcg)) {

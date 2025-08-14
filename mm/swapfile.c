@@ -1756,14 +1756,14 @@ void __swap_free_entries(struct swap_info_struct *si,
 		__swap_table_set(ci, offset, null_swp_te());
 	} while (++offset < end);
 
-	if (memcgid)
-		mem_cgroup_uncharge_swap_entries(entry, nr_pages, memcgid);
-
 	ci->count -= nr_pages;
 	if (!ci->count)
 		free_cluster(si, ci);
 	else
 		partial_free_cluster(si, ci);
+
+	if (memcgid)
+		mem_cgroup_uncharge_swap_entries(entry, nr_pages, memcgid);
 
 	/*
 	 * Make sure that try_to_unuse() observes si->inuse_pages reaching 0
