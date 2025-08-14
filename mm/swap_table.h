@@ -5,14 +5,6 @@
 #include <linux/rcupdate.h>
 #include "swap.h"
 
-#define SWP_TE_SIZE (BITS_PER_LONG / BITS_PER_BYTE)
-#define SWP_TABLE_FLAT_SIZE (SWP_TE_SIZE * SWAPFILE_CLUSTER)
-#if SWP_TABLE_FLAT_SIZE == PAGE_SIZE
-#define SWP_TABLE_FLAT_USE_PAGE 1
-#else
-#define SWP_TABLE_FLAT_USE_PAGE 0
-#endif
-
 /* A typical flat array as swap table */
 struct swap_table_flat {
 	swp_te_t entries[SWAPFILE_CLUSTER];

@@ -365,18 +365,19 @@ static void discard_swap_cluster(struct swap_info_struct *si,
 	}
 }
 
-static struct swap_table_flat *swap_table_flat_alloc(gfp_t gfp)
+static int swap_table_cluster_alloc(struct swap_cluster_info *ci, gfp_t gfp)
 {
-	if (SWP_TABLE_FLAT_USE_PAGE) {
-		struct folio *folio = folio_alloc(gfp | __GFP_ZERO, 0);
+	struct swap_table_flat *table = NULL;
 
-		return folio ? folio_address(folio) : NULL;
-	}
+	table = kmem_cache_zalloc(swap_table_cachep, gfp);
+	if (!table)
+		return -ENOMEM;
 
-	return kmem_cache_zalloc(swap_table_cachep, gfp);
+	rcu_assign_pointer(ci->table, table);
+	return 0;
 }
 
-static void swap_table_flat_free_cb(struct rcu_head *head)
+static void swap_table_free_cb(struct rcu_head *head)
 {
 	struct folio *folio = page_folio(
 		container_of(head, struct page, rcu_head));
@@ -384,20 +385,20 @@ static void swap_table_flat_free_cb(struct rcu_head *head)
 	folio_put(folio);
 }
 
-static void swap_table_flat_free(struct swap_table_flat *table)
+static void swap_table_cluster_free(struct swap_cluster_info *ci)
 {
 	unsigned int offset;
+	struct swap_table_flat *table;
+
+	lockdep_assert_held(&ci->lock);
+	table = (void *)rcu_access_pointer(ci->table);
 
 	for (offset = 0; offset < SWAPFILE_CLUSTER; offset++)
 		VM_WARN_ON_ONCE(!swp_te_is_null(table->entries[offset]));
 
-	if (SWP_TABLE_FLAT_USE_PAGE) {
-		struct folio *folio = virt_to_folio(table);
+	kmem_cache_free(swap_table_cachep, table);
 
-		call_rcu(&(folio_page(folio, 0)->rcu_head), swap_table_flat_free_cb);
-	} else {
-		kmem_cache_free(swap_table_cachep, table);
-	}
+	rcu_assign_pointer(ci->table, NULL);
 }
 
 static inline bool cluster_is_empty(struct swap_cluster_info *info)
@@ -454,21 +455,6 @@ static void move_cluster(struct swap_info_struct *si,
 	ci->flags = new_flags;
 }
 
-/* Allocate tables for reserved (bad) entries */
-static int cluster_populate_init_table(struct swap_cluster_info *ci)
-{
-	void *table;
-
-	if (!ci->table) {
-		table = swap_table_flat_alloc(GFP_KERNEL);
-		if (!table)
-			return -ENOMEM;
-		rcu_assign_pointer(ci->table, table);
-	}
-
-	return 0;
-}
-
 static void cluster_free_init_table(struct swap_cluster_info *ci)
 {
 	swp_te_t swp_te;
@@ -490,37 +476,36 @@ static int populate_cluster(struct swap_info_struct *si,
 			    struct swap_cluster_info *ci,
 			    int order)
 {
-	void *table = NULL;
+	int ret;
 
-	VM_WARN_ON(!cluster_need_populate(ci));
-	table = swap_table_flat_alloc(GFP_ATOMIC);
-	if (!table) {
+	ret = swap_table_cluster_alloc(ci, __GFP_MEMALLOC | __GFP_NOWARN);
+	if (ret == -ENOMEM) {
 		spin_unlock(&ci->lock);
 		if (!(si->flags & SWP_SOLIDSTATE))
 			spin_unlock(&si->global_cluster_lock);
 		local_unlock(&percpu_swap_cluster.lock);
 
-		table = swap_table_flat_alloc(GFP_KERNEL);
+		ret = swap_table_cluster_alloc(ci, GFP_KERNEL);
 
 		local_lock(&percpu_swap_cluster.lock);
 		if (!(si->flags & SWP_SOLIDSTATE))
 			spin_lock(&si->global_cluster_lock);
 		spin_lock(&ci->lock);
 
+		if (ret)
+			return ret;
+
 		/*
 		 * If migrated to a new CPU with usable local cluster,
 		 * use that instead to prevent contention and fragmentation.
 		 */
 		if (this_cpu_read(percpu_swap_cluster.offset[order]) ||
-			!cluster_need_populate(ci)) {
-			swap_table_flat_free(table);
+				!cluster_need_populate(ci)) {
+			swap_table_cluster_free(ci);
 			return -EAGAIN;
 		}
-		if (!table)
-			return -ENOMEM;
 	}
 
-	rcu_assign_pointer(ci->table, table);
 	return 0;
 }
 
@@ -537,12 +522,9 @@ static void __free_cluster(struct swap_info_struct *si, struct swap_cluster_info
 {
 	struct swap_table_flat *table;
 
-	lockdep_assert_held(&ci->lock);
-	table = (void *)rcu_access_pointer(ci->table);
-	rcu_assign_pointer(ci->table, NULL);
+	swap_table_cluster_free(ci);
 
 	move_cluster(si, ci, &si->free_clusters, CLUSTER_FLAG_FREE);
-	swap_table_flat_free(table);
 	ci->order = 0;
 }
 
@@ -3308,8 +3290,9 @@ static int cluster_info_mark_bad(struct swap_info_struct *si,
 	WARN_ON(ci->count >= SWAPFILE_CLUSTER);
 	WARN_ON(ci->flags);
 
-	if (cluster_populate_init_table(ci))
-		return -ENOMEM;
+	if (cluster_need_populate(ci))
+		if (swap_table_cluster_alloc(ci, GFP_KERNEL))
+			return -ENOMEM;
 
 	swp_te = __swap_table_get(ci, offset);
 	if (!swp_te_is_null(swp_te))
@@ -3752,16 +3735,14 @@ static int __init swapfile_init(void)
 
 	swapfile_maximum_size = arch_max_swapfile_size();
 
-	if (!SWP_TABLE_FLAT_USE_PAGE) {
-		/*
-		 * Once a cluster is freed, it's swap table content
-		 * is read only, and readers (all through swap_table_try_get)
-		 * verified the content after read.
-		 */
-		swap_table_cachep = kmem_cache_create("swap_table",
-				    sizeof(struct swap_table_flat),
-				    0, SLAB_PANIC | SLAB_TYPESAFE_BY_RCU, NULL);
-	}
+	/*
+	 * Once a cluster is freed, it's swap table content
+	 * is read only, and readers (all through swap_table_try_get)
+	 * verified the content after read.
+	 */
+	swap_table_cachep = kmem_cache_create("swap_table",
+			    sizeof(struct swap_table_flat),
+			    0, SLAB_PANIC | SLAB_TYPESAFE_BY_RCU, NULL);
 
 #ifdef CONFIG_MIGRATION
 	if (swapfile_maximum_size >= (1UL << SWP_MIG_TOTAL_BITS))
