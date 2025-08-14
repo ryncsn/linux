@@ -113,6 +113,7 @@ struct percpu_swap_cluster {
 	struct swap_info_struct *si[SWAP_NR_ORDERS];
 	unsigned long offset[SWAP_NR_ORDERS];
 	local_lock_t lock;
+	struct folio *table_cache;
 };
 
 static DEFINE_PER_CPU(struct percpu_swap_cluster, percpu_swap_cluster) = {
@@ -363,12 +364,22 @@ static void discard_swap_cluster(struct swap_info_struct *si,
 	}
 }
 
-static int swap_table_cluster_alloc(struct swap_cluster_info *ci, gfp_t gfp)
+static int swap_table_cluster_alloc(struct swap_cluster_info *ci, gfp_t gfp, bool cached)
 {
 	struct swap_table_flat *table = NULL;
 
 	if (SWP_TABLE_FLAT_USE_PAGE) {
 		struct folio *folio;
+
+		if (cached) {
+			for (i = 0; i < 64; i++) {
+				folio = xchg(&table_buffer[i], NULL);
+				if (folio) {
+					memset(folio_address(folio), 0, PAGE_SIZE);
+					return folio_address(folio);
+				}
+			}
+		}
 
 		folio = folio_alloc(gfp | __GFP_ZERO, 0);
 		if (folio)
@@ -383,7 +394,7 @@ static int swap_table_cluster_alloc(struct swap_cluster_info *ci, gfp_t gfp)
 	return 0;
 }
 
-static void swap_table_free_cb(struct rcu_head *head)
+static void swap_table_flat_free_cb(struct rcu_head *head)
 {
 	struct folio *folio = page_folio(
 		container_of(head, struct page, rcu_head));
@@ -393,23 +404,26 @@ static void swap_table_free_cb(struct rcu_head *head)
 
 static void swap_table_cluster_free(struct swap_cluster_info *ci)
 {
+	struct swap_table_flat *table;
 	unsigned int offset;
 	struct swap_table_flat *table;
 
 	lockdep_assert_held(&ci->lock);
 	table = (void *)rcu_access_pointer(ci->table);
+	rcu_assign_pointer(ci->table, NULL);
 
 	for (offset = 0; offset < SWAPFILE_CLUSTER; offset++)
 		VM_WARN_ON_ONCE(!swp_te_is_null(table->entries[offset]));
-
 	if (SWP_TABLE_FLAT_USE_PAGE) {
 		struct folio *folio = virt_to_folio(table);
 
-		call_rcu(&(folio_page(folio, 0)->rcu_head), swap_table_free_cb);
+		if (this_cpu_cmpxchg(percpu_swap_cluster.table_cache, NULL, folio) == NULL)
+			return;
+
+		call_rcu(&(folio_page(folio, 0)->rcu_head), swap_table_flat_free_cb);
 	} else {
 		kmem_cache_free(swap_table_cachep, table);
 	}
-	rcu_assign_pointer(ci->table, NULL);
 }
 
 static inline bool cluster_is_empty(struct swap_cluster_info *info)
@@ -431,9 +445,9 @@ static inline bool cluster_is_usable(struct swap_cluster_info *ci, int order)
 	return cluster_is_empty(ci) || order == ci->order;
 }
 
-static inline bool cluster_need_populate(struct swap_cluster_info *ci)
+static inline bool cluster_is_populated(struct swap_cluster_info *ci)
 {
-	return !rcu_access_pointer(ci->table);
+	return rcu_access_pointer(ci->table);
 }
 
 static inline unsigned int cluster_index(struct swap_info_struct *si,
@@ -531,10 +545,7 @@ static void swap_cluster_schedule_discard(struct swap_info_struct *si,
 
 static void __free_cluster(struct swap_info_struct *si, struct swap_cluster_info *ci)
 {
-	struct swap_table_flat *table;
-
 	swap_table_cluster_free(ci);
-
 	move_cluster(si, ci, &si->free_clusters, CLUSTER_FLAG_FREE);
 	ci->order = 0;
 }
@@ -607,7 +618,7 @@ static struct swap_cluster_info *isolate_lock_free_cluster(
 	}
 	spin_unlock(&si->lock);
 
-	if (ret && cluster_need_populate(ret)) {
+	if (ret && !cluster_is_populated(ret)) {
 		err = populate_cluster(si, ret, order);
 		if (err) {
 			swap_unlock_cluster(ret);
@@ -666,7 +677,9 @@ static void swap_discard_work(struct work_struct *work)
 
 	si = container_of(work, struct swap_info_struct, discard_work);
 
+	local_lock(&percpu_swap_cluster.lock);
 	swap_do_scheduled_discard(si);
+	local_unlock(&percpu_swap_cluster.lock);
 }
 
 static void swap_users_ref_free(struct percpu_ref *ref)
@@ -985,7 +998,9 @@ static void swap_reclaim_work(struct work_struct *work)
 
 	si = container_of(work, struct swap_info_struct, reclaim_work);
 
+	local_lock(&percpu_swap_cluster.lock);
 	swap_reclaim_full_clusters(si, true);
+	local_unlock(&percpu_swap_cluster.lock);
 }
 
 /*
@@ -1770,7 +1785,8 @@ int __swap_count(swp_entry_t entry)
 
 /*
  * How many references to @entry are currently swapped out?
- * This does not give an exact answer when swap count is using extend table.
+ * This does not give an exact answer when swap count is continued,
+ * but does include the high COUNT_CONTINUED flag to allow for that.
  */
 bool swap_entry_swapped(struct swap_info_struct *si, swp_entry_t entry)
 {
@@ -1788,7 +1804,7 @@ bool swap_entry_swapped(struct swap_info_struct *si, swp_entry_t entry)
 
 /*
  * How many references to @entry are currently swapped out?
- * This returns exact answer.
+ * This considers COUNT_CONTINUED so it returns exact answer.
  */
 int swp_swapcount(swp_entry_t entry)
 {
