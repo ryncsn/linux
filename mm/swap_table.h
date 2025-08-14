@@ -25,6 +25,7 @@ struct swap_table_flat {
  * NULL:     | ------------    0   -------------|
  * Shadow:   | SWAP_COUNT |---- SHADOW_VAL ---|1|
  * Folio:    | SWAP_COUNT |------ PFN -------|10|
+ * Same:     | SWAP_COUNT | CONTENT | MEMCG_ID |
  * Pointer:  |----------- Pointer ----------|100|
  *
  * Usage:
@@ -40,14 +41,18 @@ struct swap_table_flat {
  *   is usable so now `100` is reserved for potential pointer use.
  */
 
-#define SWP_TE_COUNT_BITS	BITS_PER_BYTE /* This can be shrinked if needed */
+#define SWP_TE_FLAGS_BITS	BITS_PER_BYTE /* Reserve on bit for zero map */
+#define SWP_TE_COUNT_BITS	(BITS_PER_BYTE - 1) /* Reserve on bit for zero map */
+#define SWP_TE_ZERO_MARK	BIT(BITS_PER_LONG - SWP_TE_COUNT_BITS - 1)
 #define SWP_TE_SHADOW_MARK	0b1UL
 #define SWP_TE_PFN_MARK		0b10UL
 #define SWP_TE_PFN_LOW_MASK	0b11UL
 #define SWP_TE_PFN_SHIFT	2
-#define SWP_TE_PFN_MASK		((~0UL) >> SWP_TE_COUNT_BITS)
+#define SWP_TE_PFN_MASK		((~0UL) >> SWP_TE_FLAGS_BITS)
 #define SWP_TE_COUNT_MASK	(~((~0UL) >> SWP_TE_COUNT_BITS))
+#define SWP_TE_FLAGS_MASK	(~((~0UL) >> SWP_TE_FLAGS_BITS))
 #define SWP_TE_COUNT_SHIFT	(BITS_PER_LONG - SWP_TE_COUNT_BITS)
+#define SWP_TE_FLAGS_SHIFT	(BITS_PER_LONG - SWP_TE_FLAGS_BITS)
 #define SWP_TE_COUNT_MAX	((1 << SWP_TE_COUNT_BITS) - 2)
 #define SWP_TE_COUNT_BAD	((1 << SWP_TE_COUNT_BITS) - 1) /* Same as SWP_TE_BAD */
 #define SWP_TE_BAD		(~0UL)
@@ -87,7 +92,7 @@ static inline swp_te_t shadow_swp_te(void *shadow)
 	BUILD_BUG_ON((BITS_PER_XA_VALUE + 1) != BITS_PER_BYTE * sizeof(swp_te_t));
 	BUILD_BUG_ON((unsigned long)xa_mk_value(0) != SWP_TE_SHADOW_MARK);
 	VM_WARN_ON_ONCE(shadow && !xa_is_value(shadow));
-	VM_WARN_ON((unsigned long)shadow & SWP_TE_COUNT_MASK);
+	VM_WARN_ON((unsigned long)shadow & SWP_TE_FLAGS_MASK);
 	swp_te.counter |= SWP_TE_SHADOW_MARK;
 	return swp_te;
 }
@@ -139,7 +144,7 @@ static inline struct folio *swp_te_folio(swp_te_t swp_te)
 static inline void *swp_te_shadow(swp_te_t swp_te)
 {
 	VM_WARN_ON(!swp_te_is_shadow(swp_te));
-	return (void *)(swp_te.counter & ~SWP_TE_COUNT_MASK);
+	return (void *)(swp_te.counter & ~SWP_TE_FLAGS_MASK);
 }
 
 static inline unsigned short swp_te_shadow_memcgid(swp_te_t swp_te)
@@ -163,6 +168,12 @@ static inline unsigned char swp_te_get_count(swp_te_t swp_te)
 	return ((swp_te.counter & SWP_TE_COUNT_MASK) >> SWP_TE_COUNT_SHIFT);
 }
 
+static inline unsigned char swp_te_get_flags(swp_te_t swp_te)
+{
+	VM_WARN_ON(!swp_te_is_countable(swp_te));
+	return ((swp_te.counter & SWP_TE_FLAGS_MASK) >> SWP_TE_FLAGS_SHIFT);
+}
+
 static inline swp_te_t swp_te_set_count(swp_te_t swp_te,
 					unsigned char count)
 {
@@ -173,6 +184,14 @@ static inline swp_te_t swp_te_set_count(swp_te_t swp_te,
 	swp_te.counter |= ((unsigned long)count) << SWP_TE_COUNT_SHIFT;
 	VM_BUG_ON(swp_te_get_count(swp_te) != count);
 
+	return swp_te;
+}
+
+static inline swp_te_t swp_te_set_flags(swp_te_t swp_te,
+					unsigned char count)
+{
+	swp_te.counter &= ~SWP_TE_FLAGS_MASK;
+	swp_te.counter |= ((unsigned long)count) << SWP_TE_FLAGS_SHIFT;
 	return swp_te;
 }
 
@@ -216,11 +235,11 @@ static inline void __swap_table_set_folio(struct swap_cluster_info *ci, pgoff_t 
 					  struct folio *folio)
 {
 	swp_te_t swp_te;
-	unsigned char count;
+	unsigned char flags;
 
 	swp_te = __swap_table_get(ci, off);
-	count = swp_te_get_count(swp_te);
-	swp_te = swp_te_set_count(folio_swp_te(folio), count);
+	flags = swp_te_get_flags(swp_te);
+	swp_te = swp_te_set_flags(folio_swp_te(folio), flags);
 
 	__swap_table_set(ci, off, swp_te);
 }
@@ -229,11 +248,11 @@ static inline void __swap_table_set_shadow(struct swap_cluster_info *ci, pgoff_t
 					   void *shadow)
 {
 	swp_te_t swp_te;
-	unsigned char count;
+	unsigned char flags;
 
 	swp_te = __swap_table_get(ci, off);
-	count = swp_te_get_count(swp_te);
-	swp_te = swp_te_set_count(shadow_swp_te(shadow), count);
+	flags = swp_te_get_flags(swp_te);
+	swp_te = swp_te_set_flags(shadow_swp_te(shadow), flags);
 
 	__swap_table_set(ci, off, swp_te);
 }
@@ -249,5 +268,47 @@ static inline void __swap_table_set_count(struct swap_cluster_info *ci, pgoff_t 
 	swp_te_t swp_te;
 	swp_te = swp_te_set_count(__swap_table_get(ci, off), count);
 	__swap_table_set(ci, off, swp_te);
+}
+
+static inline void __swap_table_set_zero(struct swap_cluster_info *ci, pgoff_t off)
+{
+	swp_te_t swp_te;
+	swp_te = __swap_table_get(ci, off);
+	swp_te.counter |= SWP_TE_ZERO_MARK;
+	__swap_table_set(ci, off, swp_te);
+}
+
+static inline void __swap_table_clear_zero(struct swap_cluster_info *ci, pgoff_t off)
+{
+	swp_te_t swp_te;
+	swp_te = __swap_table_get(ci, off);
+	swp_te.counter &= ~SWP_TE_ZERO_MARK;
+	__swap_table_set(ci, off, swp_te);
+}
+
+/*
+ * Return the count of contiguous swap entries that share the same
+ * zeromap status as the starting entry. If is_zeromap is not NULL,
+ * it will return the zeromap status of the starting entry.
+ */
+static inline int swap_zeromap_batch(swp_entry_t entry, int max_nr,
+				     bool *is_zerop)
+{
+	swp_te_t swp_te;
+	unsigned long start = swp_offset(entry);
+	struct swap_cluster_info *ci = swp_cluster(entry);
+	unsigned long offset = start, end = start + max_nr;
+	bool is_zero;
+
+	swp_te = __swap_table_get(ci, offset);
+	is_zero = !!(swp_te.counter & SWP_TE_ZERO_MARK);
+	if (is_zerop)
+		*is_zerop = is_zero;
+	while (++offset < end) {
+		swp_te = __swap_table_get(ci, offset);
+		if (is_zero != !!(swp_te.counter & SWP_TE_ZERO_MARK))
+			break;
+	}
+	return offset - start;
 }
 #endif
