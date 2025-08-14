@@ -159,8 +159,9 @@ static unsigned long shmem_default_max_inodes(void)
 #endif
 
 static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
-			struct folio **foliop, enum sgp_type sgp, gfp_t gfp,
-			struct vm_area_struct *vma, vm_fault_t *fault_type);
+			      struct folio **foliop, enum sgp_type sgp,
+			      gfp_t gfp, struct vm_fault *vmf,
+			      vm_fault_t *fault_type);
 
 static inline struct shmem_sb_info *SHMEM_SB(struct super_block *sb)
 {
@@ -1989,66 +1990,22 @@ unlock:
 }
 
 static struct folio *shmem_swap_alloc_folio(struct inode *inode,
-		struct vm_area_struct *vma, pgoff_t index,
+		struct vm_fault *vmf, pgoff_t index,
 		swp_entry_t entry, int order, gfp_t gfp)
 {
+	pgoff_t ilx;
+	struct folio *folio;
+	struct mempolicy *mpol;
+	unsigned long orders = BIT(0) | BIT(order);
 	struct shmem_inode_info *info = SHMEM_I(inode);
-	struct folio *folio, *swapcache;
-	int nr_pages = 1 << order;
-	gfp_t alloc_gfp = gfp;
 
-	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE)) {
-		if (WARN_ON_ONCE(order))
-			return ERR_PTR(-EINVAL);
-	} else if (order) {
-		/*
-		 * If uffd is active for the vma, we need per-page fault
-		 * fidelity to maintain the uffd semantics, then fallback
-		 * to swapin order-0 folio, as well as for zswap case.
-		 * Any existing sub folio in the swap cache also blocks
-		 * mTHP swapin.
-		 */
-		if ((vma && unlikely(userfaultfd_armed(vma))) ||
-		     !zswap_never_enabled() ||
-		     non_swapcache_batch(entry, nr_pages) != nr_pages)
-			goto fallback;
+	mpol = shmem_get_pgoff_policy(info, index, order, &ilx);
+	folio = swapin_entry(entry, gfp, orders, vmf, mpol, ilx);
+	mpol_cond_put(mpol);
 
-		alloc_gfp = thp_limit_gfp_mask(vma_thp_gfp_mask(vma), gfp);
-	}
-retry:
-	folio = shmem_alloc_folio(alloc_gfp, order, info, index);
-	if (!folio) {
-		folio = ERR_PTR(-ENOMEM);
-		goto fallback;
-	}
+	VM_WARN_ON_ONCE(folio && folio_order(folio) && folio_order(folio) != order);
 
-	if (mem_cgroup_swapin_charge_folio(folio, alloc_gfp, entry)) {
-		folio_put(folio);
-		folio = ERR_PTR(-ENOMEM);
-		goto fallback;
-	}
-
-	swapcache = swapin_folio(entry, folio);
-	if (swapcache != folio) {
-		folio_put(folio);
-		/* It may fail due to race, just retry the fault */
-		if (IS_ERR(swapcache)) {
-			folio = ERR_PTR(-EEXIST);
-			goto fallback;
-		}
-	}
-
-	return swapcache;
-
-fallback:
-	/* Order 0 swapin failed, nothing to fallback to, abort */
-	if (!order)
-		return folio;
-	entry.val += index - round_down(index, nr_pages);
-	alloc_gfp = gfp;
-	nr_pages = 1;
-	order = 0;
-	goto retry;
+	return folio;
 }
 
 /*
@@ -2250,10 +2207,11 @@ unlock:
  */
 static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 			     struct folio **foliop, enum sgp_type sgp,
-			     gfp_t gfp, struct vm_area_struct *vma,
+			     gfp_t gfp, struct vm_fault *vmf,
 			     vm_fault_t *fault_type)
 {
 	struct address_space *mapping = inode->i_mapping;
+	struct vm_area_struct *vma = vmf ? vmf->vma : NULL;
 	struct mm_struct *fault_mm = vma ? vma->vm_mm : NULL;
 	struct shmem_inode_info *info = SHMEM_I(inode);
 	swp_entry_t swap, index_entry;
@@ -2292,22 +2250,16 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 	/* Look it up and read it in.. */
 	folio = swap_cache_get_folio(swap);
 	if (!folio) {
-		if (data_race(si->flags & SWP_SYNCHRONOUS_IO)) {
+		if (data_race(si->flags & SWP_SYNCHRONOUS_IO))
 			/* Direct swapin skipping swap cache & readahead */
-			folio = shmem_swap_alloc_folio(inode, vma, index,
-						       index_entry, order, gfp);
-			if (IS_ERR(folio)) {
-				error = PTR_ERR(folio);
-				folio = NULL;
-				goto failed;
-			}
-		} else {
+			folio = shmem_swap_alloc_folio(inode, vmf, index,
+						       swap, order, gfp);
+		else
 			/* Cached swapin only supports order 0 folio */
 			folio = shmem_swapin_cluster(swap, gfp, info, index);
-			if (!folio) {
-				error = -ENOMEM;
-				goto failed;
-			}
+		if (!folio) {
+			error = -ENOMEM;
+			goto failed;
 		}
 		if (fault_type) {
 			*fault_type |= VM_FAULT_MAJOR;
@@ -2456,7 +2408,7 @@ repeat:
 
 	if (xa_is_value(folio)) {
 		error = shmem_swapin_folio(inode, index, &folio,
-					   sgp, gfp, vma, fault_type);
+					   sgp, gfp, vmf, fault_type);
 		if (error == -EEXIST)
 			goto repeat;
 

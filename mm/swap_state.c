@@ -122,8 +122,8 @@ void *swap_cache_get_shadow(swp_entry_t entry)
 
 /* Preflight check for adding a backing folio for allocated swap entries */
 static int __swap_cache_check_exist(swp_entry_t target_entry,
-					      struct swap_cluster_info *ci,
-					      unsigned long nr_pages, void **shadow)
+				    struct swap_cluster_info *ci,
+				    unsigned long nr_pages, void **shadow)
 {
 	swp_te_t exist;
 	pgoff_t offset, end;
@@ -161,6 +161,7 @@ static void __swap_cache_do_add_folio(swp_entry_t entry, struct swap_cluster_inf
 	 * Allocator should always allocate aligned entries so folio based
 	 * operations never crossed more than one cluster.
 	 */
+	VM_WARN_ON_ONCE_FOLIO(!IS_ALIGNED(offset, nr_pages), folio);
 	VM_WARN_ON_ONCE_FOLIO(!folio_test_locked(folio), folio);
 	VM_WARN_ON_ONCE_FOLIO(folio_test_swapcache(folio), folio);
 	VM_WARN_ON_ONCE_FOLIO(!folio_test_swapbacked(folio), folio);
@@ -177,55 +178,112 @@ static void __swap_cache_do_add_folio(swp_entry_t entry, struct swap_cluster_inf
 }
 
 /*
- * Try to add a folio to the swap cache for a set of swap slots before
- * doing IO (swap in or out). All swap slots covered by this folio must
- * all have a non-zero swap count.
- * @entry: swap entry indicating the slot
- * @folio: folio to be added
+ * Allocate a folio in the swap cache for a set of swap slots before
+ * doing IO (swap in or out). All swap slots covered by the allocation
+ * must all have a non-zero swap count.
+ * @target_entry: swap entry indicating the target slot
+ * @orders: allocation orders
+ * @vmf: fault information
+ * @gfp_mask: memory allocation flags
+ * @mpol: NUMA memory allocation policy to be applied
+ * @ilx: NUMA interleave index, for use only when MPOL_INTERLEAVE
  *
- * Returns the 0 on successes. Returns following error code on failure:
+ * Return error code if failed, possible error codes:
  * -EEXIST: @target_entry is cached already.
  * -ENOENT: @target_entry is freed already.
- * -EAGAIN: Only for large folio. If any sub entry covered by this folio
- *          is freed or cached, caller should shrink the order and retry.
+ * -ENOMEM: failed to allocate due to memory pressure.
  *
- * Caller must holds an reference of the swap device of @entry.
+ * Caller must holds an reference of the swap device of @target_entry.
  */
-static int swap_cache_add_folio(swp_entry_t target_entry, struct folio *folio)
+struct folio *swap_cache_alloc_folio(swp_entry_t target_entry, gfp_t gfp_mask,
+				     unsigned long orders, struct vm_fault *vmf,
+				     struct mempolicy *mpol, pgoff_t ilx)
 {
-	int err;
-	void *shadow = NULL;
-	pgoff_t offset, end;
-	swp_entry_t folio_entry;
+	gfp_t gfp;
+	void *shadow;
+	int err, order = 0;
+	struct folio *folio;
+	unsigned long address;
 	struct swap_cluster_info *ci;
-	unsigned long nr_pages = folio_nr_pages(folio);
 
-	folio_entry.val = round_down(target_entry.val, nr_pages);
-	ci = swap_lock_cluster(swp_info(target_entry),
-			       swp_offset(target_entry));
-	err = __swap_cache_check_exist(target_entry, ci, nr_pages, &shadow);
-	if (err)
-		goto fail;
-	__folio_set_locked(folio);
-	__folio_set_swapbacked(folio);
-	__swap_cache_do_add_folio(folio_entry, ci, folio);
-	swap_unlock_cluster(ci);
+	ci = swp_cluster(target_entry);
+	order = orders ? highest_order(orders) : 0;
 
-	memcg1_swapin(folio_entry, nr_pages);
+	/*
+	 * If uffd is active for the vma we need per-page fault fidelity to
+	 * maintain the uffd semantics. ZSWAP doesn't work with large folio
+	 * either.
+	 */
+	if (orders &&
+	    (!vmf || likely(!userfaultfd_armed(vmf->vma))) &&
+	    zswap_never_enabled())
+		order = highest_order(orders);
 
-	if (likely(xa_to_value(shadow)))
+	for (;;) {
+		unsigned long nr_pages = 1 << order;
+		swp_entry_t folio_entry = { .val = round_down(target_entry.val, nr_pages) };
+
+		/* First check if the range is available */
+		spin_lock(&ci->lock);
+		err = __swap_cache_check_exist(target_entry, ci, nr_pages, &shadow);
+		spin_unlock(&ci->lock);
+		if (err)
+			goto fallback;
+
+		if (order && vmf)
+			gfp = thp_limit_gfp_mask(vma_thp_gfp_mask(vmf->vma), gfp_mask);
+		else
+			gfp = gfp_mask;
+
+		if (mpol) {
+			folio = folio_alloc_mpol(gfp, order, mpol, ilx, numa_node_id());
+		} else {
+			address = round_down(vmf->address, PAGE_SIZE << order);
+			folio = vma_alloc_folio(gfp, order, vmf->vma, address);
+		}
+		if (unlikely(!folio)) {
+			err = -ENOMEM;
+			goto fallback;
+		}
+
+		if (mem_cgroup_swapin_charge_folio(folio, gfp_mask, target_entry)) {
+			folio_put(folio);
+			count_mthp_stat(order, MTHP_STAT_SWPIN_FALLBACK_CHARGE);
+			err = -ENOMEM;
+			goto fallback;
+		}
+
+		/* Double check the range is still not in conflict */
+		spin_lock(&ci->lock);
+		err = __swap_cache_check_exist(target_entry, ci, nr_pages, &shadow);
+		if (unlikely(err)) {
+			spin_unlock(&ci->lock);
+			folio_put(folio);
+			goto fallback;
+		}
+		__folio_set_locked(folio);
+		__folio_set_swapbacked(folio);
+		__swap_cache_do_add_folio(folio_entry, ci, folio);
+		spin_unlock(&ci->lock);
+
+		VM_WARN_ON_ONCE(!shadow);
 		workingset_refault(folio, shadow);
 
-	/* Caller will initiate read into locked folio */
-	folio_add_lru(folio);
+		memcg1_swapin(folio_entry, nr_pages);
+		node_stat_mod_folio(folio, NR_FILE_PAGES, nr_pages);
+		lruvec_stat_mod_folio(folio, NR_SWAPCACHE, nr_pages);
 
-	node_stat_mod_folio(folio, NR_FILE_PAGES, nr_pages);
-	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, nr_pages);
+		/* Caller will initiate read into locked new_folio */
+		folio_add_lru(folio);
 
-	return 0;
-fail:
-	swap_unlock_cluster(ci);
-	return err;
+		return folio;
+fallback:
+		if (err != -ENOMEM || err != -EAGAIN || !order)
+			return ERR_PTR(err);
+
+		count_mthp_stat(order, MTHP_STAT_SWPIN_FALLBACK);
+		order = next_order(&orders, order);
+	}
 }
 
 /*
@@ -437,73 +495,10 @@ void swap_update_readahead(struct folio *folio,
 	}
 }
 
-/* Wrapper for swap_cache_add_folio that never returns -EEXIST. */
-static struct folio *swap_cache_add_or_get(swp_entry_t target_entry,
-					   struct folio *folio)
-{
-	struct folio *swapcache;
-	int err;
-
-again:
-	err = swap_cache_add_folio(target_entry, folio);
-	if (err) {
-		if (err == -EEXIST) {
-			swapcache = swap_cache_get_folio(target_entry);
-			if (swapcache)
-				return swapcache;
-			goto again;
-		}
-		return ERR_PTR(err);
-	}
-
-	return folio;
-}
-
-/*
- * Allocate an order 0 folio in the swap cache for one swap slot before
- * doing IO (swap in or swap out). The swap slot must have a non-zero
- * swap count (swapped out).
- * @entry: swap entry indicating the slot
- * @gfp_mask: memory allocation flags
- * @mpol: NUMA memory allocation policy to be applied
- * @ilx: NUMA interleave index, for use only when MPOL_INTERLEAVE
- *
- * Returns error code if allocation failed due to memory pressure or
- * @entry is cached or freed.
- *
- * Caller must hold a reference to the swap device of @entry.
- */
-struct folio *swap_cache_alloc_folio(swp_entry_t entry, gfp_t gfp_mask,
-				     struct mempolicy *mpol, pgoff_t ilx)
-{
-	int err;
-	struct folio *folio;
-
-	/*
-	 * Get a new folio to read into from swap.  Allocate it now if
-	 * new_folio not exist, before marking swap_map SWAP_HAS_CACHE,
-	 * when -EEXIST will cause any racers to loop around until we
-	 * add it to cache.
-	 */
-	folio = folio_alloc_mpol(gfp_mask, 0, mpol, ilx, numa_node_id());
-	if (!folio)
-		return ERR_PTR(-ENOMEM);
-
-	if (mem_cgroup_swapin_charge_folio(folio, gfp_mask, entry)) {
-		folio_put(folio);
-		return ERR_PTR(-ENOMEM);
-	}
-
-	err = swap_cache_add_folio(entry, folio);
-	if (!err)
-		return folio;
-
-	return ERR_PTR(err);
-}
-
-static struct folio *swap_cache_read_folio_async(
-	swp_entry_t entry, gfp_t gfp_mask, struct mempolicy *mpol,
-	pgoff_t ilx, struct swap_iocb **plug, bool readahead)
+struct folio *swap_cache_read_folio(swp_entry_t entry, gfp_t gfp_mask,
+				    unsigned long orders, struct mempolicy *mpol,
+				    pgoff_t ilx, struct swap_iocb **plug,
+				    bool readahead)
 {
 	struct folio *folio;
 
@@ -517,7 +512,8 @@ static struct folio *swap_cache_read_folio_async(
 		folio = swap_cache_get_folio(entry);
 		if (folio)
 			return folio;
-		folio = swap_cache_alloc_folio(entry, gfp_mask, mpol, ilx);
+
+		folio = swap_cache_alloc_folio(entry, gfp_mask, 0, NULL, mpol, ilx);
 	} while (PTR_ERR(folio) == -EEXIST);
 
 	if (IS_ERR(folio))
@@ -533,7 +529,7 @@ static struct folio *swap_cache_read_folio_async(
 }
 
 /**
- * swapin_folio - swap-in one or multiple entries skipping readahead.
+ * swapin_entry - swap-in one or multiple entries skipping readahead.
  *
  * @entry: swap entry to swap in
  * @folio: new allocated folio
@@ -546,14 +542,24 @@ static struct folio *swap_cache_read_folio_async(
  * the folio start and the whole range will be read in. May return error
  * code if any sub-entry is cached or freed.
  */
-struct folio *swapin_folio(swp_entry_t entry, struct folio *folio)
+struct folio *swapin_entry(swp_entry_t entry, gfp_t gfp, unsigned long orders,
+			   struct vm_fault *vmf, struct mempolicy *mpol, pgoff_t ilx)
 {
-	struct folio *swapcache;
+	struct folio *folio;
 
-	swapcache = swap_cache_add_or_get(entry, folio);
-	if (swapcache == folio)
-		swap_read_folio(folio, NULL);
-	return swapcache;
+	do {
+		folio = swap_cache_get_folio(entry);
+		if (folio)
+			return folio;
+		folio = swap_cache_alloc_folio(entry, gfp, 0, vmf, mpol, ilx);
+	} while (PTR_ERR(folio) == -EEXIST);
+
+	if (IS_ERR(folio))
+		return NULL;
+
+	swap_read_folio(folio, NULL);
+
+	return folio;
 }
 
 /*
@@ -580,8 +586,8 @@ struct folio *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		return NULL;
 
 	mpol = get_vma_policy(vma, addr, 0, &ilx);
-	folio = swap_cache_read_folio_async(entry, gfp_mask, mpol,
-					    ilx, NULL, false);
+	folio = swap_cache_read_folio(entry, gfp_mask, 0, mpol,
+				      ilx, NULL, false);
 	mpol_cond_put(mpol);
 
 	put_swap_device(si);
@@ -694,9 +700,9 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	blk_start_plug(&plug);
 	for (offset = start_offset; offset <= end_offset ; offset++) {
 		/* Ok, do the async read-ahead now */
-		folio = swap_cache_read_folio_async(
+		folio = swap_cache_read_folio(
 				swp_entry(swp_type(entry), offset),
-				gfp_mask, mpol, ilx, &splug,
+				gfp_mask, 0, mpol, ilx, &splug,
 				offset != entry_offset);
 		if (folio)
 			folio_put(folio);
@@ -706,7 +712,7 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	lru_add_drain();	/* Push any new pages onto the LRU now */
 skip:
 	/* The page was likely read above, so no need for plugging here */
-	return swap_cache_read_folio_async(entry, gfp_mask, mpol, ilx,
+	return swap_cache_read_folio(entry, gfp_mask, 0, mpol, ilx,
 					   NULL, false);
 }
 
@@ -797,7 +803,7 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
 			continue;
 		pte_unmap(pte);
 		pte = NULL;
-		folio = swap_cache_read_folio_async(entry, gfp_mask, mpol, ilx,
+		folio = swap_cache_read_folio(entry, gfp_mask, 0, mpol, ilx,
 						    &splug, addr != vmf->address);
 		if (folio)
 			folio_put(folio);
@@ -809,7 +815,7 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
 	lru_add_drain();
 skip:
 	/* The folio was likely read above, so no need for plugging here */
-	folio = swap_cache_read_folio_async(targ_entry, gfp_mask, mpol, targ_ilx,
+	folio = swap_cache_read_folio(targ_entry, gfp_mask, 0, mpol, targ_ilx,
 					    NULL, false);
 	return folio;
 }

@@ -1110,8 +1110,8 @@ static int zswap_writeback_entry(struct zswap_entry *entry,
 		return -EEXIST;
 
 	mpol = get_task_policy(current);
-	folio = swap_cache_alloc_folio(swpentry, GFP_KERNEL, mpol,
-				       NO_INTERLEAVE_INDEX);
+	folio = swap_cache_alloc_folio(swpentry, GFP_KERNEL, 0, NULL,
+				       mpol, NO_INTERLEAVE_INDEX);
 	put_swap_device(si);
 
 	/*

@@ -4415,25 +4415,6 @@ static vm_fault_t handle_pte_marker(struct vm_fault *vmf)
 	return VM_FAULT_SIGBUS;
 }
 
-static struct folio *__alloc_swap_folio(struct vm_fault *vmf)
-{
-	struct vm_area_struct *vma = vmf->vma;
-	struct folio *folio;
-	swp_entry_t entry;
-
-	folio = vma_alloc_folio(GFP_HIGHUSER_MOVABLE, 0, vma, vmf->address);
-	if (!folio)
-		return NULL;
-
-	entry = pte_to_swp_entry(vmf->orig_pte);
-	if (mem_cgroup_swapin_charge_folio(folio, GFP_KERNEL, entry)) {
-		folio_put(folio);
-		return NULL;
-	}
-
-	return folio;
-}
-
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 /*
  * Check if the page table is still suitable for large folio swap in.
@@ -4492,38 +4473,21 @@ static inline unsigned long thp_swap_suitable_orders(pgoff_t swp_offset,
 	return orders;
 }
 
-static struct folio *alloc_swap_folio(struct vm_fault *vmf)
+static unsigned long thp_swapin_suiltable_orders(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	unsigned long orders;
-	struct folio *folio;
 	unsigned long addr;
 	swp_entry_t entry;
 	spinlock_t *ptl;
 	pte_t *pte;
-	gfp_t gfp;
 	int order;
 
-	/*
-	 * If uffd is active for the vma we need per-page fault fidelity to
-	 * maintain the uffd semantics.
-	 */
-	if (unlikely(userfaultfd_armed(vma)))
-		goto fallback;
-
-	/*
-	 * A large swapped out folio could be partially or fully in zswap. We
-	 * lack handling for such cases, so fallback to swapping in order-0
-	 * folio.
-	 */
-	if (!zswap_never_enabled())
-		goto fallback;
-
-	entry = pte_to_swp_entry(vmf->orig_pte);
 	/*
 	 * Get a list of all the (large) orders below PMD_ORDER that are enabled
 	 * and suitable for swapping THP.
 	 */
+	entry = pte_to_swp_entry(vmf->orig_pte);
 	orders = thp_vma_allowable_orders(vma, vma->vm_flags,
 			TVA_IN_PF | TVA_ENFORCE_SYSFS, BIT(PMD_ORDER) - 1);
 	orders = thp_vma_suitable_orders(vma, vmf->address, orders);
@@ -4531,12 +4495,12 @@ static struct folio *alloc_swap_folio(struct vm_fault *vmf)
 					  vmf->address, orders);
 
 	if (!orders)
-		goto fallback;
+		return 0;
 
 	pte = pte_offset_map_lock(vmf->vma->vm_mm, vmf->pmd,
 				  vmf->address & PMD_MASK, &ptl);
 	if (unlikely(!pte))
-		goto fallback;
+		return 0;
 
 	/*
 	 * For do_swap_page, find the highest order where the aligned range is
@@ -4549,9 +4513,6 @@ static struct folio *alloc_swap_folio(struct vm_fault *vmf)
 		addr = ALIGN_DOWN(vmf->address, nr_pages * PAGE_SIZE);
 		if (!can_swapin_thp(vmf, pte + pte_index(addr), addr, nr_pages))
 			continue;
-		/* Page table lock pins the swap entries / swap device */
-		if (unlikely(non_swapcache_batch(swap_entry, nr_pages) != nr_pages))
-			continue;
 		/* Zero map doesn't work with large folio yet. */
 		if (unlikely(swap_zeromap_batch(swap_entry, nr_pages, NULL) != nr_pages))
 			continue;
@@ -4559,23 +4520,7 @@ static struct folio *alloc_swap_folio(struct vm_fault *vmf)
 	}
 	pte_unmap_unlock(pte, ptl);
 
-	/* Try allocating the highest of the remaining orders. */
-	gfp = vma_thp_gfp_mask(vma);
-	while (orders) {
-		addr = ALIGN_DOWN(vmf->address, PAGE_SIZE << order);
-		folio = vma_alloc_folio(gfp, order, vma, addr);
-		if (folio) {
-			if (!mem_cgroup_swapin_charge_folio(folio, gfp, entry))
-				return folio;
-			count_mthp_stat(order, MTHP_STAT_SWPIN_FALLBACK_CHARGE);
-			folio_put(folio);
-		}
-		count_mthp_stat(order, MTHP_STAT_SWPIN_FALLBACK);
-		order = next_order(&orders, order);
-	}
-
-fallback:
-	return __alloc_swap_folio(vmf);
+	return orders;
 }
 #else /* !CONFIG_TRANSPARENT_HUGEPAGE */
 static bool can_swapin_thp(struct vm_fault *vmf, pte_t *ptep,
@@ -4584,9 +4529,9 @@ static bool can_swapin_thp(struct vm_fault *vmf, pte_t *ptep,
 	return false;
 }
 
-static struct folio *alloc_swap_folio(struct vm_fault *vmf)
+static unsigned long thp_swapin_suiltable_orders(struct vm_fault *vmf)
 {
-	return __alloc_swap_folio(vmf);
+	return 0;
 }
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 
@@ -4708,25 +4653,14 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	swapcache = folio;
 	if (!folio) {
 		if (data_race(si->flags & SWP_SYNCHRONOUS_IO)) {
-			folio = alloc_swap_folio(vmf);
-			if (folio) {
-				/*
-				 * The folio is already charged, it can only
-				 * fail due to race, retry the fault.
-				 * New fault will fallback to smaller order.
-				 */
-				swapcache = swapin_folio(entry, folio);
-				if (swapcache != folio) {
-					folio_put(folio);
-					if (IS_ERR(swapcache))
-						goto out;
-				}
-			}
+			folio = swapin_entry(entry, GFP_HIGHUSER_MOVABLE,
+					     thp_swapin_suiltable_orders(vmf),
+					     vmf, NULL, 0);
 		} else {
-			swapcache = swapin_readahead(entry, GFP_HIGHUSER_MOVABLE, vmf);
+			folio = swapin_readahead(entry, GFP_HIGHUSER_MOVABLE, vmf);
 		}
 
-		folio = swapcache;
+		swapcache = folio;
 		if (!folio) {
 			/*
 			 * Back out if somebody else faulted in this pte

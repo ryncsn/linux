@@ -187,7 +187,8 @@ extern void *swap_cache_get_shadow(swp_entry_t entry);
 extern void __swap_cache_add_folio(swp_entry_t entry,
 				   struct swap_cluster_info *ci,
 				   struct folio *folio);
-extern struct folio *swap_cache_alloc_folio(swp_entry_t entry, gfp_t gfp_flags,
+extern struct folio *swap_cache_alloc_folio(swp_entry_t entry, gfp_t gfp_mask,
+					    unsigned long orders, struct vm_fault *vmf,
 					    struct mempolicy *mpol, pgoff_t ilx);
 extern void swap_cache_del_folio(struct folio *folio);
 /* Below helpers requires the caller to lock the swap cluster. */
@@ -232,7 +233,8 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t flag,
 		struct mempolicy *mpol, pgoff_t ilx);
 struct folio *swapin_readahead(swp_entry_t entry, gfp_t flag,
 		struct vm_fault *vmf);
-struct folio *swapin_folio(swp_entry_t entry, struct folio *folio);
+struct folio *swapin_entry(swp_entry_t entry, gfp_t flag, unsigned long orders,
+			   struct vm_fault *vmf, struct mempolicy *mpol, pgoff_t ilx);
 void swap_update_readahead(struct folio *folio, struct vm_area_struct *vma,
 			   unsigned long addr);
 
@@ -343,11 +345,6 @@ static inline struct folio *swap_cluster_readahead(swp_entry_t entry,
 
 static inline struct folio *swapin_readahead(swp_entry_t swp, gfp_t gfp_mask,
 			struct vm_fault *vmf)
-{
-	return NULL;
-}
-
-static inline struct folio *swapin_folio(swp_entry_t ent, struct folio *folio)
 {
 	return NULL;
 }
