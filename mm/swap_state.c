@@ -120,6 +120,37 @@ void *swap_cache_get_shadow(swp_entry_t entry)
 	return swp_te_is_shadow(swp_te) ? swp_te_shadow(swp_te) : NULL;
 }
 
+/* Preflight check for adding a backing folio for allocated swap entries */
+static int __swap_cache_check_exist(swp_entry_t target_entry,
+					      struct swap_cluster_info *ci,
+					      unsigned long nr_pages, void **shadow)
+{
+	swp_te_t exist;
+	pgoff_t offset, end;
+
+	offset = swp_offset(target_entry);
+	if (unlikely(!ci->table))
+		return -ENOENT;
+	exist = __swap_table_get(ci, offset);
+	if (unlikely(swp_te_is_folio(exist)))
+		return -EEXIST;
+	if (unlikely(!swp_te_get_count(exist)))
+		return -ENOENT;
+	*shadow = swp_te_shadow(exist);
+	if (nr_pages == 1)
+		return 0;
+
+	offset = round_down(offset, nr_pages);
+	end = offset + nr_pages;
+	do {
+		exist = __swap_table_get(ci, offset);
+		if (unlikely(swp_te_is_folio(exist) || !swp_te_get_count(exist)))
+			return -EAGAIN;
+	} while (++offset < end);
+
+	return 0;
+}
+
 static void __swap_cache_do_add_folio(swp_entry_t entry, struct swap_cluster_info *ci,
 				      struct folio *folio)
 {
@@ -163,44 +194,18 @@ static void __swap_cache_do_add_folio(swp_entry_t entry, struct swap_cluster_inf
 static int swap_cache_add_folio(swp_entry_t target_entry, struct folio *folio)
 {
 	int err;
-	swp_te_t exist;
 	void *shadow = NULL;
 	pgoff_t offset, end;
 	swp_entry_t folio_entry;
 	struct swap_cluster_info *ci;
 	unsigned long nr_pages = folio_nr_pages(folio);
 
-	offset = swp_offset(target_entry);
-	ci = swap_lock_cluster(swp_info(target_entry), offset);
-	if (unlikely(!ci->table)) {
-		err = -ENOENT;
+	folio_entry.val = round_down(target_entry.val, nr_pages);
+	ci = swap_lock_cluster(swp_info(target_entry),
+			       swp_offset(target_entry));
+	err = __swap_cache_check_exist(target_entry, ci, nr_pages, &shadow);
+	if (err)
 		goto fail;
-	}
-	exist = __swap_table_get(ci, offset);
-	if (unlikely(swp_te_is_folio(exist))) {
-		err = -EEXIST;
-		goto fail;
-	} else if (unlikely(!swp_te_get_count(exist))) {
-		err = -ENOENT;
-		goto fail;
-	}
-	shadow = swp_te_shadow(exist);
-
-	if (nr_pages > 1) {
-		folio_entry.val = round_down(target_entry.val, nr_pages);
-		offset = swp_offset(folio_entry);
-		end = offset + nr_pages;
-		do {
-			exist = __swap_table_get(ci, offset);
-			if (unlikely(swp_te_is_folio(exist) || !swp_te_get_count(exist))) {
-				err = -EAGAIN;
-				goto fail;
-			}
-		} while (++offset < end);
-	} else {
-		folio_entry = target_entry;
-	}
-
 	__folio_set_locked(folio);
 	__folio_set_swapbacked(folio);
 	__swap_cache_do_add_folio(folio_entry, ci, folio);
