@@ -3,6 +3,7 @@
 #define _MM_SWAP_TABLE_H
 
 #include <linux/rcupdate.h>
+#include "internal.h"
 #include "swap.h"
 
 #define SWP_TE_SIZE (BITS_PER_LONG / BITS_PER_BYTE)
@@ -139,6 +140,21 @@ static inline void *swp_te_shadow(swp_te_t swp_te)
 {
 	VM_WARN_ON(!swp_te_is_shadow(swp_te));
 	return (void *)(swp_te.counter & ~SWP_TE_COUNT_MASK);
+}
+
+static inline unsigned short swp_te_shadow_memcgid(swp_te_t swp_te)
+{
+	VM_WARN_ON(!swp_te_is_shadow(swp_te));
+
+	unsigned short memcgid;
+	unsigned long entry;
+
+	entry = xa_to_value(swp_te_shadow(swp_te));
+	entry >>= WORKINGSET_SHIFT;
+	entry >>= NODES_SHIFT;
+	memcgid = entry & ((1UL << MEM_CGROUP_ID_SHIFT) - 1);
+
+	return memcgid;
 }
 
 static inline unsigned char swp_te_get_count(swp_te_t swp_te)

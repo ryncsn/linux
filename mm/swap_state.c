@@ -127,6 +127,7 @@ static int __swap_cache_check_exist(swp_entry_t target_entry,
 {
 	swp_te_t exist;
 	pgoff_t offset, end;
+	unsigned short memcg_id;
 
 	offset = swp_offset(target_entry);
 	if (unlikely(!ci->table))
@@ -140,11 +141,14 @@ static int __swap_cache_check_exist(swp_entry_t target_entry,
 	if (nr_pages == 1)
 		return 0;
 
+	memcg_id = swp_te_shadow_memcgid(exist);
 	offset = round_down(offset, nr_pages);
 	end = offset + nr_pages;
 	do {
 		exist = __swap_table_get(ci, offset);
-		if (unlikely(swp_te_is_folio(exist) || !swp_te_get_count(exist)))
+		if (unlikely(swp_te_is_folio(exist) ||
+			     !swp_te_get_count(exist) ||
+			     swp_te_shadow_memcgid(exist) != memcg_id))
 			return -EAGAIN;
 	} while (++offset < end);
 
