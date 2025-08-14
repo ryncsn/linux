@@ -40,7 +40,7 @@ struct swap_cluster_info {
 	u16 count;
 	u8 flags;
 	u8 order;
-	swp_te_t *table;
+	swp_te_t __rcu *table;
 	unsigned long *extend_table; /* Only used for extended swap count */
 	struct list_head list;
 };

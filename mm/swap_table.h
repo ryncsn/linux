@@ -2,7 +2,21 @@
 #ifndef _MM_SWAP_TABLE_H
 #define _MM_SWAP_TABLE_H
 
+#include <linux/rcupdate.h>
 #include "swap.h"
+
+#define SWP_TE_SIZE (BITS_PER_LONG / BITS_PER_BYTE)
+#define SWP_TABLE_FLAT_SIZE (SWP_TE_SIZE * SWAPFILE_CLUSTER)
+#if SWP_TABLE_FLAT_SIZE == PAGE_SIZE
+#define SWP_TABLE_FLAT_USE_PAGE 1
+#else
+#define SWP_TABLE_FLAT_USE_PAGE 0
+#endif
+
+/* A typical flat array as swap table */
+struct swap_table_flat {
+	swp_te_t entries[SWAPFILE_CLUSTER];
+};
 
 /*
  * Swap table entry type and bit layouts:
@@ -133,13 +147,6 @@ static inline unsigned char swp_te_get_count(swp_te_t swp_te)
 	return ((swp_te.counter & SWP_TE_COUNT_MASK) >> SWP_TE_COUNT_SHIFT);
 }
 
-static inline unsigned char swp_te_try_get_count(swp_te_t swp_te)
-{
-	if (swp_te_is_countable(swp_te))
-		return swp_te_get_count(swp_te);
-	return 0;
-}
-
 static inline swp_te_t swp_te_set_count(swp_te_t swp_te,
 					unsigned char count)
 {
@@ -160,14 +167,32 @@ static inline swp_te_t swp_te_set_count(swp_te_t swp_te,
 static inline void __swap_table_set(struct swap_cluster_info *ci, pgoff_t off,
 				    swp_te_t swp_te)
 {
-	atomic_long_set(&ci->table[off % SWAPFILE_CLUSTER], swp_te.counter);
+	lockdep_assert_held(&ci->lock);
+	swp_te_t *table = rcu_dereference_protected(ci->table, true);
+	atomic_long_set(&table[off % SWAPFILE_CLUSTER], swp_te.counter);
+}
+
+/* May return stall data, caller have to double check the result */
+static inline swp_te_t swap_table_try_get(struct swap_cluster_info *ci, pgoff_t off)
+{
+	swp_te_t swp_te;
+	rcu_read_lock();
+	swp_te_t *table = rcu_dereference_check(ci->table,
+						lockdep_is_held(&ci->lock));
+	if (table)
+		swp_te.counter = atomic_long_read(&table[off % SWAPFILE_CLUSTER]);
+	else
+		swp_te = null_swp_te();
+	rcu_read_unlock();
+	return swp_te;
 }
 
 static inline swp_te_t __swap_table_get(struct swap_cluster_info *ci, pgoff_t off)
 {
-	swp_te_t swp_te = {
-		.counter = atomic_long_read(&ci->table[off % SWAPFILE_CLUSTER])
-	};
+	swp_te_t swp_te;
+	swp_te_t *table = rcu_dereference_check(ci->table,
+						lockdep_is_held(&ci->lock));
+	swp_te.counter = atomic_long_read(&table[off % SWAPFILE_CLUSTER]);
 	return swp_te;
 }
 
