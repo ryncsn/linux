@@ -369,7 +369,15 @@ static int swap_table_cluster_alloc(struct swap_cluster_info *ci, gfp_t gfp)
 {
 	struct swap_table_flat *table = NULL;
 
-	table = kmem_cache_zalloc(swap_table_cachep, gfp);
+	if (SWP_TABLE_FLAT_USE_PAGE) {
+		struct folio *folio;
+
+		folio = folio_alloc(gfp | __GFP_ZERO, 0);
+		if (folio)
+			table = folio_address(folio);
+	} else {
+		table = kmem_cache_zalloc(swap_table_cachep, gfp);
+	}
 	if (!table)
 		return -ENOMEM;
 
@@ -396,8 +404,13 @@ static void swap_table_cluster_free(struct swap_cluster_info *ci)
 	for (offset = 0; offset < SWAPFILE_CLUSTER; offset++)
 		VM_WARN_ON_ONCE(!swp_te_is_null(table->entries[offset]));
 
-	kmem_cache_free(swap_table_cachep, table);
+	if (SWP_TABLE_FLAT_USE_PAGE) {
+		struct folio *folio = virt_to_folio(table);
 
+		call_rcu(&(folio_page(folio, 0)->rcu_head), swap_table_free_cb);
+	} else {
+		kmem_cache_free(swap_table_cachep, table);
+	}
 	rcu_assign_pointer(ci->table, NULL);
 }
 
@@ -3735,14 +3748,16 @@ static int __init swapfile_init(void)
 
 	swapfile_maximum_size = arch_max_swapfile_size();
 
-	/*
-	 * Once a cluster is freed, it's swap table content
-	 * is read only, and readers (all through swap_table_try_get)
-	 * verified the content after read.
-	 */
-	swap_table_cachep = kmem_cache_create("swap_table",
-			    sizeof(struct swap_table_flat),
-			    0, SLAB_PANIC | SLAB_TYPESAFE_BY_RCU, NULL);
+	if (!SWP_TABLE_FLAT_USE_PAGE) {
+		/*
+		 * Once a cluster is freed, it's swap table content
+		 * is read only, and readers (all through swap_table_try_get)
+		 * verified the content after read.
+		 */
+		swap_table_cachep = kmem_cache_create("swap_table",
+				    sizeof(struct swap_table_flat),
+				    0, SLAB_PANIC | SLAB_TYPESAFE_BY_RCU, NULL);
+	}
 
 #ifdef CONFIG_MIGRATION
 	if (swapfile_maximum_size >= (1UL << SWP_MIG_TOTAL_BITS))
