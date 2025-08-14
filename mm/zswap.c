@@ -1101,7 +1101,6 @@ static int zswap_writeback_entry(struct zswap_entry *entry,
 	pgoff_t offset = swp_offset(swpentry);
 	struct folio *folio;
 	struct mempolicy *mpol;
-	bool folio_was_allocated;
 	struct swap_info_struct *si;
 	int ret = 0;
 
@@ -1112,20 +1111,19 @@ static int zswap_writeback_entry(struct zswap_entry *entry,
 
 	mpol = get_task_policy(current);
 	folio = swap_cache_alloc_folio(swpentry, GFP_KERNEL, mpol,
-				       NO_INTERLEAVE_INDEX, &folio_was_allocated);
+				       NO_INTERLEAVE_INDEX);
 	put_swap_device(si);
-	if (!folio)
-		return -ENOMEM;
 
 	/*
-	 * Found an existing folio, we raced with swapin or concurrent
+	 * Swap cache allocaiton might fail due to OOM, or freed entry,
+	 * or found an existing folio when we raced with swapin or concurrent
 	 * shrinker. We generally writeback cold folios from zswap, and
 	 * swapin means the folio just became hot, so skip this folio.
 	 * For unlikely concurrent shrinker case, it will be unlinked
 	 * and freed when invalidated by the concurrent shrinker anyway.
 	 */
-	if (!folio_was_allocated) {
-		ret = -EEXIST;
+	if (IS_ERR(folio)) {
+		ret = PTR_ERR(folio);
 		goto out;
 	}
 

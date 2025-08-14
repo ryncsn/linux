@@ -188,8 +188,7 @@ extern void __swap_cache_add_folio(swp_entry_t entry,
 				   struct swap_cluster_info *ci,
 				   struct folio *folio);
 extern struct folio *swap_cache_alloc_folio(swp_entry_t entry, gfp_t gfp_flags,
-					    struct mempolicy *mpol, pgoff_t ilx,
-					    bool *alloced);
+					    struct mempolicy *mpol, pgoff_t ilx);
 extern void swap_cache_del_folio(struct folio *folio);
 /* Below helpers requires the caller to lock the swap cluster. */
 extern void __swap_cache_del_folio(swp_entry_t entry,
