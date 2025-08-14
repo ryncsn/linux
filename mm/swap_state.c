@@ -166,22 +166,14 @@ static int swap_cache_add_folio(swp_entry_t target_entry, struct folio *folio)
 	int err;
 	swp_te_t exist;
 	void *shadow = NULL;
+	pgoff_t offset, end;
 	swp_entry_t folio_entry;
-	struct swap_info_struct *si;
 	struct swap_cluster_info *ci;
-	pgoff_t end, start, offset, target_offset;
 	unsigned long nr_pages = folio_nr_pages(folio);
 
-	folio_entry.val = round_down(target_entry.val, nr_pages);
-	target_offset = swp_offset(target_entry);
-	start = swp_offset(folio_entry);
-	end = start + nr_pages;
-
-	offset = start;
-	si = swp_info(target_entry);
-
-	ci = swap_lock_cluster(si, offset);
-	exist = __swap_table_get(ci, target_offset);
+	offset = swp_offset(target_entry);
+	ci = swap_lock_cluster(swp_info(target_entry), offset);
+	exist = __swap_table_get(ci, offset);
 	if (unlikely(swp_te_is_folio(exist))) {
 		err = -EEXIST;
 		goto fail;
@@ -190,13 +182,21 @@ static int swap_cache_add_folio(swp_entry_t target_entry, struct folio *folio)
 		goto fail;
 	}
 	shadow = swp_te_shadow(exist);
-	do {
-		exist = __swap_table_get(ci, offset);
-		if (unlikely(swp_te_is_folio(exist) || !swp_te_get_count(exist))) {
-			err = -EAGAIN;
-			goto fail;
-		}
-	} while (++offset < end);
+
+	if (nr_pages > 1) {
+		folio_entry.val = round_down(target_entry.val, nr_pages);
+		offset = swp_offset(folio_entry);
+		end = offset + nr_pages;
+		do {
+			exist = __swap_table_get(ci, offset);
+			if (unlikely(swp_te_is_folio(exist) || !swp_te_get_count(exist))) {
+				err = -EAGAIN;
+				goto fail;
+			}
+		} while (++offset < end);
+	} else {
+		folio_entry = target_entry;
+	}
 
 	__folio_set_locked(folio);
 	__folio_set_swapbacked(folio);
