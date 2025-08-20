@@ -279,7 +279,12 @@ struct swap_info_struct {
 	unsigned int pages;		/* total of usable pages of swap */
 	atomic_long_t inuse_pages;	/* number of those currently in use */
 	struct swap_sequential_cluster *global_cluster; /* Use one global cluster for rotating device */
-	spinlock_t global_cluster_lock;	/* Serialize usage of global cluster */
+	struct mutex global_cluster_lock;
+					/*
+					 * Serialize usage of the global cluster,
+					 * use a mutex in case a parallel swap
+					 * out needs sleep allocation.
+					 */
 	struct rb_root swap_extent_root;/* root of the swap extent rbtree */
 	struct block_device *bdev;	/* swap device or bdev of swap file */
 	struct file *swap_file;		/* seldom referenced */
