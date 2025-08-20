@@ -2,6 +2,7 @@
 #ifndef _MM_SWAP_H
 #define _MM_SWAP_H
 
+#include <linux/atomic.h> /* for atomic_long_t */
 struct mempolicy;
 struct swap_iocb;
 
@@ -18,6 +19,15 @@ extern int page_cluster;
 extern struct swap_info_struct *swap_info[];
 
 /*
+ * A swap table entry represents the status of a swap slot
+ * on a swap (physical or virtual) device. Swap table is a
+ * 1:1 map of the swap device, composed of swap table entries.
+ *
+ * See mm/swap_table.h for details.
+ */
+typedef atomic_long_t swp_te_t;
+
+/*
  * We use this to track usage of a cluster. A cluster is a block of swap disk
  * space with SWAPFILE_CLUSTER pages long and naturally aligns in disk. All
  * free clusters are organized into a list. We fetch an entry from the list to
@@ -27,14 +37,11 @@ extern struct swap_info_struct *swap_info[];
  * protected by cluster lock.
  */
 struct swap_cluster_info {
-	spinlock_t lock;	/*
-				 * Protect swap_cluster_info fields
-				 * other than list, and swap_info_struct->swap_map
-				 * elements corresponding to the swap cluster.
-				 */
+	spinlock_t lock; /* Protects all fields below other than list */
 	u16 count;
 	u8 flags;
 	u8 order;
+	swp_te_t *table;
 	struct list_head list;
 };
 
@@ -79,19 +86,60 @@ static inline struct swap_cluster_info *swp_offset_cluster(
 	return &si->cluster_info[offset / SWAPFILE_CLUSTER];
 }
 
-static inline struct swap_cluster_info *swap_lock_cluster(
-		struct swap_info_struct *si,
-		unsigned long offset)
+static inline struct swap_cluster_info *swp_cluster(swp_entry_t entry)
+{
+	return swp_offset_cluster(swp_info(entry), swp_offset(entry));
+}
+
+static inline unsigned int swp_cluster_offset(swp_entry_t entry)
+{
+	return swp_offset(entry) % SWAPFILE_CLUSTER;
+}
+
+/*
+ * Lock the swap cluster of the given offset. The caller must ensure the swap
+ * offset is valid and that the following accesses won't go beyond the locked
+ * cluster. swap_lock_folio_cluster is preferred when possible
+ */
+static __always_inline struct swap_cluster_info *__swap_lock_cluster(
+		struct swap_info_struct *si, unsigned long offset, bool irq)
 {
 	struct swap_cluster_info *ci = swp_offset_cluster(si, offset);
+
 	VM_WARN_ON_ONCE(percpu_ref_is_zero(&si->users)); /* race with swapoff */
-	spin_lock(&ci->lock);
+	if (irq)
+		spin_lock_irq(&ci->lock);
+	else
+		spin_lock(&ci->lock);
 	return ci;
 }
+#define swap_lock_cluster(si, off) __swap_lock_cluster(si, off, false)
+
+/*
+ * Lock the swap cluster that holds a folio's swap entries. Caller needs to lock
+ * the folio and ensure it's in the swap cache, and only touch the folio's swap
+ * entries. A folio's entries are always in one cluster, and a locked folio lock
+ * ensures it won't be freed from the swap cache, hence stabilizing the device.
+ */
+static inline struct swap_cluster_info *__swap_lock_folio_cluster(
+		struct folio *folio, bool irq)
+{
+	VM_WARN_ON_ONCE_FOLIO(!folio_test_locked(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(!folio_test_swapcache(folio), folio);
+	return __swap_lock_cluster(swp_info(folio->swap),
+				   swp_offset(folio->swap), irq);
+}
+#define swap_lock_folio_cluster(folio) __swap_lock_folio_cluster(folio, false)
+#define swap_lock_folio_cluster_irq(folio) __swap_lock_folio_cluster(folio, true)
 
 static inline void swap_unlock_cluster(struct swap_cluster_info *ci)
 {
 	spin_unlock(&ci->lock);
+}
+
+static inline void swap_unlock_cluster_irq(struct swap_cluster_info *ci)
+{
+	spin_unlock_irq(&ci->lock);
 }
 
 /* linux/mm/page_io.c */
@@ -113,10 +161,34 @@ void __swap_writepage(struct folio *folio, struct swap_iocb **swap_plug);
 #define SWAP_ADDRESS_SPACE_SHIFT	14
 #define SWAP_ADDRESS_SPACE_PAGES	(1 << SWAP_ADDRESS_SPACE_SHIFT)
 #define SWAP_ADDRESS_SPACE_MASK		(SWAP_ADDRESS_SPACE_PAGES - 1)
-extern struct address_space *swapper_spaces[];
-#define swap_address_space(entry)			    \
-	(&swapper_spaces[swp_type(entry)][swp_offset(entry) \
-		>> SWAP_ADDRESS_SPACE_SHIFT])
+extern struct address_space swap_space __ro_after_init;
+static inline struct address_space *swap_address_space(swp_entry_t entry)
+{
+	return &swap_space;
+}
+
+/*
+ * All swap cache helpers below require the caller to ensure the swap entries
+ * are valid and pin the device. This can be guaranteed by:
+ * - get_swap_device: this ensures a single entry is valid and increases the
+ *   swap device's refcount.
+ * - Locking a folio in the swap cache: this ensures the folio won't be freed
+ *   from the swap cache, stabilizes its entries, and the swap device.
+ * - Locking anything referencing the swap entry: e.g. locking the PTL that
+ *   protects swap entries in the page table, so they won't be freed.
+ */
+extern struct folio *swap_cache_get_folio(swp_entry_t entry);
+extern void *swap_cache_get_shadow(swp_entry_t entry);
+extern int swap_cache_add_folio(swp_entry_t entry,
+				struct folio *folio, void **shadow);
+extern void swap_cache_del_folio(struct folio *folio);
+/* Below helpers also require the caller to lock the swap cluster. */
+extern void __swap_cache_del_folio(swp_entry_t entry,
+				   struct folio *folio, void *shadow);
+extern void __swap_cache_replace_folio(struct swap_cluster_info *ci,
+				      swp_entry_t entry, struct folio *old,
+				      struct folio *new);
+extern void __swap_cache_clear_shadow(swp_entry_t entry, int nr_ents);
 
 /*
  * Return the swap device position of the swap entry.
@@ -124,15 +196,6 @@ extern struct address_space *swapper_spaces[];
 static inline loff_t swap_dev_pos(swp_entry_t entry)
 {
 	return ((loff_t)swp_offset(entry)) << PAGE_SHIFT;
-}
-
-/*
- * Return the swap cache index of the swap entry.
- */
-static inline pgoff_t swap_cache_index(swp_entry_t entry)
-{
-	BUILD_BUG_ON((SWP_OFFSET_MASK | SWAP_ADDRESS_SPACE_MASK) != SWP_OFFSET_MASK);
-	return swp_offset(entry) & SWAP_ADDRESS_SPACE_MASK;
 }
 
 /**
@@ -159,16 +222,7 @@ static inline bool folio_contains_swap(struct folio *folio, swp_entry_t entry)
 }
 
 void show_swap_cache_info(void);
-void *get_shadow_from_swap_cache(swp_entry_t entry);
-int add_to_swap_cache(struct folio *folio, swp_entry_t entry,
-		      gfp_t gfp, void **shadowp);
-void __delete_from_swap_cache(struct folio *folio,
-			      swp_entry_t entry, void *shadow);
-void delete_from_swap_cache(struct folio *folio);
-void clear_shadow_from_swap_cache(int type, unsigned long begin,
-				  unsigned long end);
 void swapcache_clear(struct swap_info_struct *si, swp_entry_t entry, int nr);
-struct folio *swap_cache_get_folio(swp_entry_t entry);
 struct folio *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		struct vm_area_struct *vma, unsigned long addr,
 		struct swap_iocb **plug);
@@ -233,6 +287,13 @@ static inline int non_swapcache_batch(swp_entry_t entry, int max_nr)
 
 #else /* CONFIG_SWAP */
 struct swap_iocb;
+
+#define swap_lock_cluster(si, offset) NULL
+#define swap_lock_folio_cluster(folio) NULL
+#define swap_lock_folio_cluster_irq(folio) NULL
+#define swap_unlock_cluster(ci) do {} while (0)
+#define swap_unlock_cluster_irq(ci) do {} while (0)
+
 static inline struct swap_info_struct *swp_info(swp_entry_t entry)
 {
 	return NULL;
@@ -248,11 +309,6 @@ static inline void swap_write_unplug(struct swap_iocb *sio)
 static inline struct address_space *swap_address_space(swp_entry_t entry)
 {
 	return NULL;
-}
-
-static inline pgoff_t swap_cache_index(swp_entry_t entry)
-{
-	return 0;
 }
 
 static inline bool folio_contains_swap(struct folio *folio, swp_entry_t entry)
@@ -296,29 +352,29 @@ static inline struct folio *swap_cache_get_folio(swp_entry_t entry)
 	return NULL;
 }
 
-static inline void *get_shadow_from_swap_cache(swp_entry_t entry)
+static inline void *swap_cache_get_shadow(swp_entry_t end)
 {
 	return NULL;
 }
 
-static inline int add_to_swap_cache(struct folio *folio, swp_entry_t entry,
-					gfp_t gfp_mask, void **shadowp)
+static inline int swap_cache_add_folio(swp_entry_t end, struct folio *folio, void **shadow)
 {
-	return -1;
+	return -EINVAL;
 }
 
-static inline void __delete_from_swap_cache(struct folio *folio,
-					swp_entry_t entry, void *shadow)
-{
-}
-
-static inline void delete_from_swap_cache(struct folio *folio)
+static inline void swap_cache_del_folio(struct folio *folio)
 {
 }
 
-static inline void clear_shadow_from_swap_cache(int type, unsigned long begin,
-				unsigned long end)
+static inline void __swap_cache_del_folio(swp_entry_t entry, struct folio *folio, void *shadow)
 {
+}
+
+static inline void __swap_cache_replace_folio(
+		struct swap_cluster_info *ci, swp_entry_t entry,
+		struct folio *old, struct folio *new)
+{
+	return -EINVAL;
 }
 
 static inline unsigned int folio_swap_flags(struct folio *folio)
@@ -352,7 +408,7 @@ static inline int non_swapcache_batch(swp_entry_t entry, int max_nr)
 static inline pgoff_t folio_index(struct folio *folio)
 {
 	if (unlikely(folio_test_swapcache(folio)))
-		return swap_cache_index(folio->swap);
+		return swp_offset(folio->swap);
 	return folio->index;
 }
 
