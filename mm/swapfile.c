@@ -432,7 +432,24 @@ static inline unsigned int cluster_offset(struct swap_info_struct *si,
 
 static struct swap_table_flat *swap_table_alloc(gfp_t gfp)
 {
-	return kmem_cache_zalloc(swap_table_cachep, gfp);
+	if (SWP_TABLE_FLAT_USE_PAGE) {
+		struct folio *folio;
+
+		folio = folio_alloc(gfp | __GFP_ZERO, 0);
+		if (folio)
+			return folio_address(folio);
+		return NULL;
+	} else {
+		return kmem_cache_zalloc(swap_table_cachep, gfp);
+	}
+}
+
+static void swap_table_free_folio_rcu_cb(struct rcu_head *head)
+{
+	struct folio *folio;
+
+	folio = page_folio(container_of(head, struct page, rcu_head));
+	folio_put(folio);
 }
 
 static void swap_table_free_rcu(struct swap_table_flat *table)
@@ -442,7 +459,14 @@ static void swap_table_free_rcu(struct swap_table_flat *table)
 	for (offset = 0; offset < SWAPFILE_CLUSTER; offset++)
 		VM_WARN_ON_ONCE(!swp_te_is_null(table->entries[offset]));
 
-	kmem_cache_free(swap_table_cachep, table);
+	if (SWP_TABLE_FLAT_USE_PAGE) {
+		struct folio *folio = virt_to_folio(table);
+
+		call_rcu(&(folio_page(folio, 0)->rcu_head),
+			 swap_table_free_folio_rcu_cb);
+	} else {
+		kmem_cache_free(swap_table_cachep, table);
+	}
 }
 
 static void swap_cluster_install_table(struct swap_cluster_info *ci,
@@ -455,8 +479,7 @@ static void swap_cluster_free_table(struct swap_cluster_info *ci)
 {
 	struct swap_table_flat *table;
 
-	/* Only empty cluster's table is allow to be freed  */
-	VM_WARN_ON_ONCE(!cluster_is_empty(ci));
+	lockdep_assert_held(&ci->lock);
 	table = (void *)rcu_access_pointer(ci->table);
 	rcu_assign_pointer(ci->table, NULL);
 
@@ -4115,9 +4138,11 @@ static int __init swapfile_init(void)
 	 * only, and all swap cache readers (swap_cache_*) verifies
 	 * the content before use. So it's safe to use RCU slab here.
 	 */
-	swap_table_cachep = kmem_cache_create("swap_table",
-			    sizeof(struct swap_table_flat),
-			    0, SLAB_PANIC | SLAB_TYPESAFE_BY_RCU, NULL);
+	if (!SWP_TABLE_FLAT_USE_PAGE) {
+		swap_table_cachep = kmem_cache_create("swap_table",
+				    sizeof(struct swap_table_flat),
+				    0, SLAB_PANIC | SLAB_TYPESAFE_BY_RCU, NULL);
+	}
 
 #ifdef CONFIG_MIGRATION
 	if (swapfile_maximum_size >= (1UL << SWP_MIG_TOTAL_BITS))
