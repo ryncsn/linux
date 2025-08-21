@@ -2,7 +2,13 @@
 #ifndef _MM_SWAP_TABLE_H
 #define _MM_SWAP_TABLE_H
 
+#include <linux/rcupdate.h>
 #include "swap.h"
+
+/* A typical flat array as swap table */
+struct swap_table_flat {
+	swp_te_t entries[SWAPFILE_CLUSTER];
+};
 
 /*
  * Swap table entry could be a pointer (folio), a XA_VALUE (shadow), or NULL.
@@ -73,17 +79,37 @@ static inline void *swp_te_shadow(swp_te_t swp_te)
 static inline void __swap_cluster_set(struct swap_cluster_info *ci,
 				      unsigned int off, swp_te_t swp_te)
 {
+	swp_te_t *table = rcu_dereference_protected(ci->table, true);
+
+	lockdep_assert_held(&ci->lock);
 	VM_WARN_ON_ONCE(off >= SWAPFILE_CLUSTER);
-	atomic_long_set(&ci->table[off], swp_te.counter);
+	atomic_long_set(&table[off], swp_te.counter);
+}
+
+static inline swp_te_t swap_cluster_get(struct swap_cluster_info *ci,
+					unsigned int off)
+{
+	swp_te_t swp_te;
+	rcu_read_lock();
+	swp_te_t *table = rcu_dereference_check(ci->table,
+						lockdep_is_held(&ci->lock));
+	if (table)
+		swp_te.counter = atomic_long_read(&table[off]);
+	else
+		swp_te = null_swp_te();
+	rcu_read_unlock();
+	return swp_te;
 }
 
 static inline swp_te_t __swap_cluster_get(struct swap_cluster_info *ci,
 					  unsigned int off)
 {
-	swp_te_t swp_te = {
-		.counter = atomic_long_read(&ci->table[off])
-	};
+	swp_te_t *table = rcu_dereference_protected(ci->table,
+						    lockdep_is_held(&ci->lock));
+	swp_te_t swp_te;
+
 	VM_WARN_ON_ONCE(off >= SWAPFILE_CLUSTER);
+	swp_te.counter = atomic_long_read(&table[off]);
 	return swp_te;
 }
 

@@ -105,6 +105,8 @@ static DEFINE_SPINLOCK(swap_avail_lock);
 
 struct swap_info_struct *swap_info[MAX_SWAPFILES];
 
+static struct kmem_cache *swap_table_cachep;
+
 static DEFINE_MUTEX(swapon_mutex);
 
 static DECLARE_WAIT_QUEUE_HEAD(proc_poll_wait);
@@ -400,9 +402,16 @@ static inline bool cluster_is_discard(struct swap_cluster_info *info)
 	return info->flags == CLUSTER_FLAG_DISCARD;
 }
 
+static inline bool cluster_is_populated(struct swap_cluster_info *ci)
+{
+	return rcu_access_pointer(ci->table);
+}
+
 static inline bool cluster_is_usable(struct swap_cluster_info *ci, int order)
 {
 	if (unlikely(ci->flags > CLUSTER_FLAG_USABLE))
+		return false;
+	if (!cluster_is_populated(ci))
 		return false;
 	if (!order)
 		return true;
@@ -421,32 +430,37 @@ static inline unsigned int cluster_offset(struct swap_info_struct *si,
 	return cluster_index(si, ci) * SWAPFILE_CLUSTER;
 }
 
-static int swap_table_alloc_table(struct swap_cluster_info *ci)
+static struct swap_table_flat *swap_table_alloc(gfp_t gfp)
 {
-	WARN_ON(ci->table);
-	ci->table = kzalloc(sizeof(swp_te_t) * SWAPFILE_CLUSTER, GFP_KERNEL);
-	if (!ci->table)
-		return -ENOMEM;
-	return 0;
+	return kmem_cache_zalloc(swap_table_cachep, gfp);
+}
+
+static void swap_table_free_rcu(struct swap_table_flat *table)
+{
+	unsigned int offset;
+
+	for (offset = 0; offset < SWAPFILE_CLUSTER; offset++)
+		VM_WARN_ON_ONCE(!swp_te_is_null(table->entries[offset]));
+
+	kmem_cache_free(swap_table_cachep, table);
+}
+
+static void swap_cluster_install_table(struct swap_cluster_info *ci,
+				       struct swap_table_flat *table)
+{
+	rcu_assign_pointer(ci->table, table);
 }
 
 static void swap_cluster_free_table(struct swap_cluster_info *ci)
 {
-	unsigned int ci_off;
-	swp_te_t swp_te;
+	struct swap_table_flat *table;
 
-	if (!ci->table)
-		return;
+	/* Only empty cluster's table is allow to be freed  */
+	VM_WARN_ON_ONCE(!cluster_is_empty(ci));
+	table = (void *)rcu_access_pointer(ci->table);
+	rcu_assign_pointer(ci->table, NULL);
 
-	for (ci_off = 0; ci_off < SWAPFILE_CLUSTER; ci_off++) {
-		swp_te = __swap_cluster_get(ci, ci_off);
-		if (!swp_te_is_null(swp_te))
-			pr_err_once("swap: unclean swap space on swapoff: 0x%llx",
-				    swp_te.counter);
-	}
-
-	kfree(ci->table);
-	ci->table = NULL;
+	swap_table_free_rcu(table);
 }
 
 static void move_cluster(struct swap_info_struct *si,
@@ -478,7 +492,7 @@ static void swap_cluster_schedule_discard(struct swap_info_struct *si,
 
 static void __free_cluster(struct swap_info_struct *si, struct swap_cluster_info *ci)
 {
-	lockdep_assert_held(&ci->lock);
+	swap_cluster_free_table(ci);
 	move_cluster(si, ci, &si->free_clusters, CLUSTER_FLAG_FREE);
 	ci->order = 0;
 }
@@ -498,10 +512,6 @@ static struct swap_cluster_info *isolate_lock_cluster(
 	struct swap_cluster_info *ci, *ret = NULL;
 
 	spin_lock(&si->lock);
-
-	if (unlikely(!(si->flags & SWP_WRITEOK)))
-		goto out;
-
 	list_for_each_entry(ci, list, list) {
 		if (!spin_trylock(&ci->lock))
 			continue;
@@ -516,8 +526,108 @@ static struct swap_cluster_info *isolate_lock_cluster(
 		ret = ci;
 		break;
 	}
-out:
 	spin_unlock(&si->lock);
+
+	return ret;
+}
+
+/*
+ * Allocate a swap table may need to sleep, which leads to migration,
+ * so attempt an atomic allocation first then fallback and handle
+ * potential race.
+ */
+static struct swap_cluster_info *
+__free_cluster_alloc_table(struct swap_info_struct *si,
+			   struct swap_cluster_info *ci, int order)
+{
+	pgoff_t offset;
+	struct swap_table_flat *table;
+	struct swap_cluster_info *pcp_ci;
+
+	table = swap_table_alloc(__GFP_HIGH | __GFP_NOWARN);
+	if (table) {
+		swap_cluster_install_table(ci, table);
+		return ci;
+	}
+
+	/*
+	 * Try a sleep allocation. Each isolated free cluster may cause
+	 * a sleep allocation, but there is a limited number of them, so
+	 * the potential recursive allocation should be limited.
+	 */
+	spin_unlock(&ci->lock);
+	local_unlock(&percpu_swap_cluster.lock);
+	table = swap_table_alloc(GFP_KERNEL);
+
+	local_lock(&percpu_swap_cluster.lock);
+	/*
+	 * Back to atomic context. First, check if we migrated to a
+	 * new CPU with the existing cluster, if so, try using that first.
+	 * No need to check for it for the spinning device, as swap is
+	 * serialized by the global lock.
+	 *
+	 * The count check here is rough but ensures order 0 will succeed.
+	 */
+	offset = this_cpu_read(percpu_swap_cluster.offset[order]);
+	if ((si->flags & SWP_SOLIDSTATE) && offset) {
+		pcp_ci = swap_lock_cluster(si, offset);
+		if (cluster_is_usable(pcp_ci, order) &&
+		    pcp_ci->count < SWAPFILE_CLUSTER) {
+			swap_cluster_free_table(ci);
+			return pcp_ci;
+		}
+		swap_unlock_cluster(pcp_ci);
+	}
+
+	/* Nothing should have touched the dangling cluster. */
+	spin_lock(&ci->lock);
+	if (WARN_ON_ONCE(!cluster_is_populated(ci)))
+		return ci;
+
+	swap_cluster_install_table(ci, table);
+	return ci;
+}
+
+/*
+ * Isolate and lock the first free cluster in the free list.
+ *
+ * The difference with isolate_lock_cluster is that a free cluster needs
+ * to be populated before use. So allocate the swap table for it here
+ * and set its expected allocation order.
+ */
+static struct swap_cluster_info *
+isolate_lock_free_cluster(struct swap_info_struct *si, int order)
+{
+	struct list_head *free_clusters = &si->free_clusters;
+	struct swap_cluster_info *ci, *ret = NULL;
+
+	if (list_empty(free_clusters))
+		return NULL;
+
+	spin_lock(&si->lock);
+	list_for_each_entry(ci, &si->free_clusters, list) {
+		if (!spin_trylock(&ci->lock))
+			continue;
+		list_del(&ci->list);
+
+		VM_WARN_ON_ONCE(!cluster_is_empty(ci));
+		VM_WARN_ON_ONCE(ci->flags != CLUSTER_FLAG_FREE);
+
+		/*
+		 * Set order here, the cluster will surely be used unless
+		 * raced with swapoff (!SWP_WRITEOK), in that case it will
+		 * be freed again by relocate_cluster (may lead to discard
+		 * on empty space, but that's a really trivial issue).
+		 */
+		ci->order = order;
+		ci->flags = CLUSTER_FLAG_NONE;
+		ret = ci;
+		break;
+	}
+	spin_unlock(&si->lock);
+
+	if (ret && !WARN_ON_ONCE(cluster_is_populated(ret)))
+		return __free_cluster_alloc_table(si, ret, order);
 
 	return ret;
 }
@@ -652,17 +762,27 @@ static void relocate_cluster(struct swap_info_struct *si,
  * added to free cluster list and its usage counter will be increased by 1.
  * Only used for initialization.
  */
-static void inc_cluster_info_page(struct swap_info_struct *si,
+static int inc_cluster_info_page(struct swap_info_struct *si,
 	struct swap_cluster_info *cluster_info, unsigned long page_nr)
 {
 	unsigned long idx = page_nr / SWAPFILE_CLUSTER;
+	struct swap_table_flat *table;
 	struct swap_cluster_info *ci;
 
 	ci = cluster_info + idx;
+	if (!ci->table) {
+		table = swap_table_alloc(GFP_KERNEL);
+		if (!table)
+			return -ENOMEM;
+		swap_cluster_install_table(ci, table);
+	}
+
 	ci->count++;
 
 	VM_BUG_ON(ci->count > SWAPFILE_CLUSTER);
 	VM_BUG_ON(ci->flags);
+
+	return 0;
 }
 
 static bool cluster_reclaim_range(struct swap_info_struct *si,
@@ -744,12 +864,8 @@ static bool cluster_alloc_range(struct swap_info_struct *si, struct swap_cluster
 	if (!(si->flags & SWP_WRITEOK))
 		return false;
 
-	/*
-	 * The first allocation in a cluster makes the
-	 * cluster exclusive to this order
-	 */
-	if (cluster_is_empty(ci))
-		ci->order = order;
+	/* Cluster order is set on isolate */
+	VM_WARN_ON(order && ci->order != order);
 
 	memset(si->swap_map + start, usage, nr_pages);
 	/*
@@ -804,7 +920,7 @@ static unsigned int alloc_swap_scan_cluster(struct swap_info_struct *si,
 				goto out;
 			if (cluster_is_empty(ci))
 				offset = start;
-			/* Reclaim failed but cluster is usable, try next */
+			/* Reclaim failed but cluster is usable, try next  */
 			if (!ret)
 				continue;
 		}
@@ -825,6 +941,22 @@ out:
 	} else {
 		si->global_cluster->next[order] = next;
 	}
+	return found;
+}
+
+static unsigned int alloc_swap_scan_free_list(struct swap_info_struct *si,
+					      unsigned int order,
+					      unsigned char usage)
+{
+	unsigned int found = SWAP_ENTRY_INVALID;
+	struct swap_cluster_info *ci = isolate_lock_free_cluster(si, order);
+	unsigned long offset;
+
+	if (ci) {
+		offset = cluster_offset(si, ci);
+		found = alloc_swap_scan_cluster(si, ci, offset, order, usage);
+	}
+
 	return found;
 }
 
@@ -919,7 +1051,7 @@ static unsigned long cluster_alloc_swap_entry(struct swap_info_struct *si, int o
 
 	if (!(si->flags & SWP_SOLIDSTATE)) {
 		/* Serialize HDD SWAP allocation for each device. */
-		spin_lock(&si->global_cluster_lock);
+		mutex_lock(&si->global_cluster_lock);
 		offset = si->global_cluster->next[order];
 		if (offset == SWAP_ENTRY_INVALID)
 			goto new_cluster;
@@ -944,8 +1076,7 @@ new_cluster:
 	 * to spread out the writes.
 	 */
 	if (si->flags & SWP_PAGE_DISCARD) {
-		found = alloc_swap_scan_list(si, &si->free_clusters, order, usage,
-					     false);
+		found = alloc_swap_scan_free_list(si, order, usage);
 		if (found)
 			goto done;
 	}
@@ -958,8 +1089,7 @@ new_cluster:
 	}
 
 	if (!(si->flags & SWP_PAGE_DISCARD)) {
-		found = alloc_swap_scan_list(si, &si->free_clusters, order, usage,
-					     false);
+		found = alloc_swap_scan_free_list(si, order, usage);
 		if (found)
 			goto done;
 	}
@@ -1009,7 +1139,8 @@ new_cluster:
 	}
 done:
 	if (!(si->flags & SWP_SOLIDSTATE))
-		spin_unlock(&si->global_cluster_lock);
+		mutex_unlock(&si->global_cluster_lock);
+
 	return found;
 }
 
@@ -1690,7 +1821,6 @@ int swp_swapcount(swp_entry_t entry)
 	offset = swp_offset(entry);
 
 	ci = swap_lock_cluster(si, offset);
-
 	count = swap_count(si->swap_map[offset]);
 	if (!(count & COUNT_CONTINUED))
 		goto out;
@@ -2682,12 +2812,22 @@ static void wait_for_allocation(struct swap_info_struct *si)
 static void free_cluster_info(struct swap_cluster_info *cluster_info,
 			      unsigned long maxpages)
 {
+	struct swap_cluster_info *ci;
 	int i, nr_clusters = DIV_ROUND_UP(maxpages, SWAPFILE_CLUSTER);
 
 	if (!cluster_info)
 		return;
-	for (i = 0; i < nr_clusters; i++)
-		swap_cluster_free_table(&cluster_info[i]);
+	for (i = 0; i < nr_clusters; i++) {
+		ci = &cluster_info[i];
+		/*
+		 * There could be bad block, reset the counter.
+		 * We may want to check the bad block number
+		 * for better debug checking.
+		 */
+		ci->count = 0;
+		if (ci->table)
+			swap_cluster_free_table(ci);
+	}
 	kvfree(cluster_info);
 }
 
@@ -3220,11 +3360,8 @@ static struct swap_cluster_info *setup_clusters(struct swap_info_struct *si,
 	if (!cluster_info)
 		goto err;
 
-	for (i = 0; i < nr_clusters; i++) {
+	for (i = 0; i < nr_clusters; i++)
 		spin_lock_init(&cluster_info[i].lock);
-		if (swap_table_alloc_table(&cluster_info[i]))
-			goto err_free;
-	}
 
 	if (!(si->flags & SWP_SOLIDSTATE)) {
 		si->global_cluster = kmalloc(sizeof(*si->global_cluster),
@@ -3233,7 +3370,7 @@ static struct swap_cluster_info *setup_clusters(struct swap_info_struct *si,
 			goto err_free;
 		for (i = 0; i < SWAP_NR_ORDERS; i++)
 			si->global_cluster->next[i] = SWAP_ENTRY_INVALID;
-		spin_lock_init(&si->global_cluster_lock);
+		mutex_init(&si->global_cluster_lock);
 	}
 
 	/*
@@ -3243,16 +3380,23 @@ static struct swap_cluster_info *setup_clusters(struct swap_info_struct *si,
 	 * See setup_swap_map(): header page, bad pages,
 	 * and the EOF part of the last cluster.
 	 */
-	inc_cluster_info_page(si, cluster_info, 0);
+	err = inc_cluster_info_page(si, cluster_info, 0);
+	if (err)
+		goto err;
 	for (i = 0; i < swap_header->info.nr_badpages; i++) {
 		unsigned int page_nr = swap_header->info.badpages[i];
 
 		if (page_nr >= maxpages)
 			continue;
-		inc_cluster_info_page(si, cluster_info, page_nr);
+		err = inc_cluster_info_page(si, cluster_info, page_nr);
+		if (err)
+			goto err;
 	}
-	for (i = maxpages; i < round_up(maxpages, SWAPFILE_CLUSTER); i++)
-		inc_cluster_info_page(si, cluster_info, i);
+	for (i = maxpages; i < round_up(maxpages, SWAPFILE_CLUSTER); i++) {
+		err = inc_cluster_info_page(si, cluster_info, i);
+		if (err)
+			goto err;
+	}
 
 	INIT_LIST_HEAD(&si->free_clusters);
 	INIT_LIST_HEAD(&si->full_clusters);
@@ -3965,6 +4109,15 @@ static int __init swapfile_init(void)
 		plist_head_init(&swap_avail_heads[nid]);
 
 	swapfile_maximum_size = arch_max_swapfile_size();
+
+	/*
+	 * Once a cluster is freed, it's swap table content is read
+	 * only, and all swap cache readers (swap_cache_*) verifies
+	 * the content before use. So it's safe to use RCU slab here.
+	 */
+	swap_table_cachep = kmem_cache_create("swap_table",
+			    sizeof(struct swap_table_flat),
+			    0, SLAB_PANIC | SLAB_TYPESAFE_BY_RCU, NULL);
 
 #ifdef CONFIG_MIGRATION
 	if (swapfile_maximum_size >= (1UL << SWP_MIG_TOTAL_BITS))
