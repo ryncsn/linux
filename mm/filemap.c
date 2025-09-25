@@ -956,7 +956,7 @@ unlock:
 		xas_unlock_irq(&xas);
 
 		/* split needed, alloc here and retry. */
-		if (split_order) {
+		if (unlikely(split_order)) {
 			xas_split_alloc(&xas, old, split_order, gfp);
 			if (xas_error(&xas))
 				goto error;
