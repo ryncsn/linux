@@ -500,12 +500,6 @@ __notrace_funcgraph struct task_struct *__switch_to(struct task_struct *prev,
 	ptrauth_thread_switch_user(next);
 
 	/*
-	 *  vendor hook is needed before the dsb(),
-	 *  because MPAM is related to cache maintenance.
-	 */
-	trace_android_vh_mpam_set(prev, next);
-
-	/*
 	 * Complete any pending TLB or cache maintenance on this CPU in case
 	 * the thread migrates to a different CPU.
 	 * This full barrier is also required by the membarrier system
