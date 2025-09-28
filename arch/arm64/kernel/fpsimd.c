@@ -170,9 +170,7 @@ static void fpsimd_bind_task_to_cpu(void);
 
 static void __get_cpu_fpsimd_context(void)
 {
-	bool busy = __this_cpu_xchg(fpsimd_context_busy, true);
-
-	WARN_ON(busy);
+	__this_cpu_write(fpsimd_context_busy, true);
 }
 
 /*
@@ -192,9 +190,7 @@ static void get_cpu_fpsimd_context(void)
 
 static void __put_cpu_fpsimd_context(void)
 {
-	bool busy = __this_cpu_xchg(fpsimd_context_busy, false);
-
-	WARN_ON(!busy); /* No matching get_cpu_fpsimd_context()? */
+	__this_cpu_write(fpsimd_context_busy, false);
 }
 
 /*
@@ -309,13 +305,10 @@ static void fpsimd_save(void)
 		this_cpu_ptr(&fpsimd_last_state);
 	/* set by fpsimd_bind_task_to_cpu() or fpsimd_bind_state_to_cpu() */
 
-	WARN_ON(!system_supports_fpsimd());
-	WARN_ON(!have_cpu_fpsimd_context());
-
 	if (!test_thread_flag(TIF_FOREIGN_FPSTATE)) {
 		if (IS_ENABLED(CONFIG_ARM64_SVE) &&
 		    test_thread_flag(TIF_SVE)) {
-			if (WARN_ON(sve_get_vl() != last->sve_vl)) {
+			if (unlikely(sve_get_vl() != last->sve_vl)) {
 				/*
 				 * Can't save the user regs, so current would
 				 * re-enter user with corrupt state.

@@ -479,10 +479,7 @@ static __always_inline bool __cpus_have_const_cap(int num)
  */
 static __always_inline bool cpus_have_final_cap(int num)
 {
-	if (system_capabilities_finalized())
-		return __cpus_have_const_cap(num);
-	else
-		BUG();
+	return __cpus_have_const_cap(num);
 }
 
 /*
