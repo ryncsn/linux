@@ -38,7 +38,6 @@
 #include <linux/seq_file.h>
 #include <linux/compat.h>
 #include <linux/rculist.h>
-#include <net/busy_poll.h>
 
 /*
  * LOCKING:
@@ -375,88 +374,6 @@ static inline int ep_events_available(struct eventpoll *ep)
 	return !list_empty_careful(&ep->rdllist) ||
 		READ_ONCE(ep->ovflist) != EP_UNACTIVE_PTR;
 }
-
-#ifdef CONFIG_NET_RX_BUSY_POLL
-static bool ep_busy_loop_end(void *p, unsigned long start_time)
-{
-	struct eventpoll *ep = p;
-
-	return ep_events_available(ep) || busy_loop_timeout(start_time);
-}
-
-/*
- * Busy poll if globally on and supporting sockets found && no events,
- * busy loop will return if need_resched or ep_events_available.
- *
- * we must do our busy polling with irqs enabled
- */
-static bool ep_busy_loop(struct eventpoll *ep, int nonblock)
-{
-	unsigned int napi_id = READ_ONCE(ep->napi_id);
-
-	if ((napi_id >= MIN_NAPI_ID) && net_busy_loop_on()) {
-		napi_busy_loop(napi_id, nonblock ? NULL : ep_busy_loop_end, ep, false,
-			       BUSY_POLL_BUDGET);
-		if (ep_events_available(ep))
-			return true;
-		/*
-		 * Busy poll timed out.  Drop NAPI ID for now, we can add
-		 * it back in when we have moved a socket with a valid NAPI
-		 * ID onto the ready list.
-		 */
-		ep->napi_id = 0;
-		return false;
-	}
-	return false;
-}
-
-/*
- * Set epoll busy poll NAPI ID from sk.
- */
-static inline void ep_set_busy_poll_napi_id(struct epitem *epi)
-{
-	struct eventpoll *ep;
-	unsigned int napi_id;
-	struct socket *sock;
-	struct sock *sk;
-
-	if (!net_busy_loop_on())
-		return;
-
-	sock = sock_from_file(epi->ffd.file);
-	if (!sock)
-		return;
-
-	sk = sock->sk;
-	if (!sk)
-		return;
-
-	napi_id = READ_ONCE(sk->sk_napi_id);
-	ep = epi->ep;
-
-	/* Non-NAPI IDs can be rejected
-	 *	or
-	 * Nothing to do if we already have this ID
-	 */
-	if (napi_id < MIN_NAPI_ID || napi_id == ep->napi_id)
-		return;
-
-	/* record NAPI ID for use in next busy poll */
-	ep->napi_id = napi_id;
-}
-
-#else
-
-static inline bool ep_busy_loop(struct eventpoll *ep, int nonblock)
-{
-	return false;
-}
-
-static inline void ep_set_busy_poll_napi_id(struct epitem *epi)
-{
-}
-
-#endif /* CONFIG_NET_RX_BUSY_POLL */
 
 /*
  * As described in commit 0ccf831cb lockdep: annotate epoll
@@ -1175,8 +1092,6 @@ static int ep_poll_callback(wait_queue_entry_t *wait, unsigned mode, int sync, v
 
 	read_lock_irqsave(&ep->lock, flags);
 
-	ep_set_busy_poll_napi_id(epi);
-
 	/*
 	 * If the event mask does not contain any poll(2) event, we consider the
 	 * descriptor to be disabled. This condition is likely the effect of the
@@ -1571,9 +1486,6 @@ static int ep_insert(struct eventpoll *ep, const struct epoll_event *event,
 	/* We have to drop the new item inside our item list to keep track of it */
 	write_lock_irq(&ep->lock);
 
-	/* record NAPI ID of new item if present */
-	ep_set_busy_poll_napi_id(epi);
-
 	/* If the file is already "ready" we drop it inside the ready list */
 	if (revents && !ep_is_linked(epi)) {
 		list_add_tail(&epi->rdllink, &ep->rdllist);
@@ -1866,10 +1778,6 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
 
 		if (timed_out)
 			return 0;
-
-		eavail = ep_busy_loop(ep, timed_out);
-		if (eavail)
-			continue;
 
 		if (signal_pending(current))
 			return -EINTR;
