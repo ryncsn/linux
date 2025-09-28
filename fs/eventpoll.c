@@ -2175,11 +2175,11 @@ static int do_epoll_wait(int epfd, struct epoll_event __user *events,
 	struct eventpoll *ep;
 
 	/* The maximum number of event must be greater than zero */
-	if (maxevents <= 0 || maxevents > EP_MAX_EVENTS)
+	if (unlikely(maxevents <= 0 || maxevents > EP_MAX_EVENTS))
 		return -EINVAL;
 
 	/* Verify that the area passed by the user is writeable */
-	if (!access_ok(events, maxevents * sizeof(struct epoll_event)))
+	if (unlikely(!access_ok(events, maxevents * sizeof(struct epoll_event))))
 		return -EFAULT;
 
 	/* Get the "struct file *" for the eventpoll file */
@@ -2192,7 +2192,7 @@ static int do_epoll_wait(int epfd, struct epoll_event __user *events,
 	 * the user passed to us _is_ an eventpoll file.
 	 */
 	error = -EINVAL;
-	if (!is_file_epoll(f.file))
+	if (unlikely(!is_file_epoll(f.file)))
 		goto error_fput;
 
 	/*
