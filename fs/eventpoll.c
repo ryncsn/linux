@@ -2184,7 +2184,7 @@ static int do_epoll_wait(int epfd, struct epoll_event __user *events,
 
 	/* Get the "struct file *" for the eventpoll file */
 	f = fdget(epfd);
-	if (!f.file)
+	if (unlikely(!f.file))
 		return -EBADF;
 
 	/*
