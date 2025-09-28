@@ -29,9 +29,7 @@
 #include <linux/rcupdate.h>
 #include <linux/hrtimer.h>
 #include <linux/freezer.h>
-#include <net/busy_poll.h>
 #include <linux/vmalloc.h>
-
 #include <linux/uaccess.h>
 
 
@@ -465,10 +463,9 @@ get_max:
 #define POLLEX_SET (EPOLLPRI | EPOLLNVAL)
 
 static inline void wait_key_set(poll_table *wait, unsigned long in,
-				unsigned long out, unsigned long bit,
-				__poll_t ll_flag)
+				unsigned long out, unsigned long bit)
 {
-	wait->_key = POLLEX_SET | ll_flag;
+	wait->_key = POLLEX_SET;
 	if (in & bit)
 		wait->_key |= POLLIN_SET;
 	if (out & bit)
@@ -482,8 +479,6 @@ static noinline_for_stack int do_select(int n, fd_set_bits *fds, struct timespec
 	poll_table *wait;
 	int retval, i, timed_out = 0;
 	u64 slack = 0;
-	__poll_t busy_flag = net_busy_loop_on() ? POLL_BUSY_LOOP : 0;
-	unsigned long busy_start = 0;
 
 	rcu_read_lock();
 	retval = max_select_fd(n, fds);
@@ -506,7 +501,6 @@ static noinline_for_stack int do_select(int n, fd_set_bits *fds, struct timespec
 	retval = 0;
 	for (;;) {
 		unsigned long *rinp, *routp, *rexp, *inp, *outp, *exp;
-		bool can_busy_loop = false;
 
 		inp = fds->in; outp = fds->out; exp = fds->ex;
 		rinp = fds->res_in; routp = fds->res_out; rexp = fds->res_ex;
@@ -532,8 +526,7 @@ static noinline_for_stack int do_select(int n, fd_set_bits *fds, struct timespec
 				mask = EPOLLNVAL;
 				f = fdget(i);
 				if (f.file) {
-					wait_key_set(wait, in, out, bit,
-						     busy_flag);
+					wait_key_set(wait, in, out, bit);
 					mask = vfs_poll(f.file, wait);
 
 					fdput(f);
@@ -553,18 +546,6 @@ static noinline_for_stack int do_select(int n, fd_set_bits *fds, struct timespec
 					retval++;
 					wait->_qproc = NULL;
 				}
-				/* got something, stop busy polling */
-				if (retval) {
-					can_busy_loop = false;
-					busy_flag = 0;
-
-				/*
-				 * only remember a returned
-				 * POLL_BUSY_LOOP if we asked for it
-				 */
-				} else if (busy_flag & mask)
-					can_busy_loop = true;
-
 			}
 			if (res_in)
 				*rinp = res_in;
@@ -581,17 +562,6 @@ static noinline_for_stack int do_select(int n, fd_set_bits *fds, struct timespec
 			retval = table.error;
 			break;
 		}
-
-		/* only if found POLL_BUSY_LOOP sockets && not out of time */
-		if (can_busy_loop && !need_resched()) {
-			if (!busy_start) {
-				busy_start = busy_loop_current_time();
-				continue;
-			}
-			if (!busy_loop_timeout(busy_start))
-				continue;
-		}
-		busy_flag = 0;
 
 		/*
 		 * If this is the first loop and we have a timeout
@@ -851,9 +821,7 @@ struct poll_list {
  * pwait poll_table will be used by the fd-provided poll handler for waiting,
  * if pwait->_qproc is non-NULL.
  */
-static inline __poll_t do_pollfd(struct pollfd *pollfd, poll_table *pwait,
-				     bool *can_busy_poll,
-				     __poll_t busy_flag)
+static inline __poll_t do_pollfd(struct pollfd *pollfd, poll_table *pwait)
 {
 	int fd = pollfd->fd;
 	__poll_t mask = 0, filter;
@@ -868,10 +836,8 @@ static inline __poll_t do_pollfd(struct pollfd *pollfd, poll_table *pwait,
 
 	/* userland u16 ->events contains POLL... bitmap */
 	filter = demangle_poll(pollfd->events) | EPOLLERR | EPOLLHUP;
-	pwait->_key = filter | busy_flag;
+	pwait->_key = filter;
 	mask = vfs_poll(f.file, pwait);
-	if (mask & busy_flag)
-		*can_busy_poll = true;
 	mask &= filter;		/* Mask out unneeded events. */
 	fdput(f);
 
@@ -888,8 +854,6 @@ static int do_poll(struct poll_list *list, struct poll_wqueues *wait,
 	ktime_t expire, *to = NULL;
 	int timed_out = 0, count = 0;
 	u64 slack = 0;
-	__poll_t busy_flag = net_busy_loop_on() ? POLL_BUSY_LOOP : 0;
-	unsigned long busy_start = 0;
 
 	/* Optimise the no-wait case */
 	if (end_time && !end_time->tv_sec && !end_time->tv_nsec) {
@@ -902,7 +866,6 @@ static int do_poll(struct poll_list *list, struct poll_wqueues *wait,
 
 	for (;;) {
 		struct poll_list *walk;
-		bool can_busy_loop = false;
 
 		for (walk = list; walk != NULL; walk = walk->next) {
 			struct pollfd * pfd, * pfd_end;
@@ -917,13 +880,9 @@ static int do_poll(struct poll_list *list, struct poll_wqueues *wait,
 				 * this. They'll get immediately deregistered
 				 * when we break out and return.
 				 */
-				if (do_pollfd(pfd, pt, &can_busy_loop,
-					      busy_flag)) {
+				if (do_pollfd(pfd, pt)) {
 					count++;
 					pt->_qproc = NULL;
-					/* found something, stop busy polling */
-					busy_flag = 0;
-					can_busy_loop = false;
 				}
 			}
 		}
@@ -939,17 +898,6 @@ static int do_poll(struct poll_list *list, struct poll_wqueues *wait,
 		}
 		if (count || timed_out)
 			break;
-
-		/* only if found POLL_BUSY_LOOP sockets && not out of time */
-		if (can_busy_loop && !need_resched()) {
-			if (!busy_start) {
-				busy_start = busy_loop_current_time();
-				continue;
-			}
-			if (!busy_loop_timeout(busy_start))
-				continue;
-		}
-		busy_flag = 0;
 
 		/*
 		 * If this is the first loop and we have a timeout
