@@ -2101,8 +2101,7 @@ static void __split_huge_pud_locked(struct vm_area_struct *vma, pud_t *pud,
 
 	count_vm_event(THP_SPLIT_PUD);
 
-	pudp_huge_clear_flush_notify(vma, haddr, pud);
-}
+	pudp_huge_clear_flush_notify(vma, haddr, pud);}
 
 void __split_huge_pud(struct vm_area_struct *vma, pud_t *pud,
 		unsigned long address)
@@ -2204,11 +2203,10 @@ static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 			page = pmd_page(old_pmd);
 			if (!PageDirty(page) && pmd_dirty(old_pmd))
 				set_page_dirty(page);
-			if (!PageReferenced(page) && pmd_young(old_pmd))
-				SetPageReferenced(page);
+			if (pmd_young(old_pmd) && vma_has_recency(vma))
+				folio_mark_accessed(page_folio(page));
 			page_remove_rmap(page, vma, true);
-			put_page(page);
-		}
+			put_page(page);		}
 		add_mm_counter(mm, mm_counter_file(page), -HPAGE_PMD_NR);
 		return;
 	}
