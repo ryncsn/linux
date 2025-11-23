@@ -389,24 +389,24 @@ static void __lru_cache_activate_folio(struct folio *folio)
 static void lru_gen_inc_refs(struct folio *folio)
 {
 	unsigned long new_flags, old_flags = READ_ONCE(folio->flags.f);
+	int refs;
 
 	if (folio_test_unevictable(folio))
 		return;
 
 	/* see the comment on LRU_REFS_FLAGS */
-	if (!folio_test_referenced(folio)) {
-		set_mask_bits(&folio->flags.f, LRU_REFS_MASK, BIT(PG_referenced));
-		return;
-	}
-
 	do {
-		if ((old_flags & LRU_REFS_MASK) == LRU_REFS_MASK) {
+		refs = lru_refs_from_flags(old_flags);
+		if (refs == LRU_REFS_MAX) {
 			if (!folio_test_workingset(folio))
 				folio_set_workingset(folio);
 			return;
 		}
-
-		new_flags = old_flags + BIT(LRU_REFS_PGOFF);
+		if (!folio_lru_refs(folio)) {
+			folio_set_lru_refs(folio, 1);
+			return;
+		}
+		lru_refs_set_flags(&new_flags, refs + 1);
 	} while (!try_cmpxchg(&folio->flags.f, &old_flags, new_flags));
 }
 
