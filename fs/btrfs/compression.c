@@ -21,6 +21,7 @@
 #include <linux/sched/mm.h>
 #include <linux/log2.h>
 #include <linux/shrinker.h>
+#include <linux/mm_inline.h>
 #include <crypto/hash.h>
 #include "misc.h"
 #include "ctree.h"

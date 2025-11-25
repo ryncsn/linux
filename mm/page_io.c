@@ -25,6 +25,7 @@
 #include <linux/sched/task.h>
 #include <linux/delayacct.h>
 #include <linux/zswap.h>
+#include <linux/mm_inline.h>
 #include "swap.h"
 
 static void __end_swap_bio_write(struct bio *bio)
