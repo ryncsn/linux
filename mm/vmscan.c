@@ -2160,7 +2160,7 @@ static void shrink_active_list(unsigned long nr_to_scan,
 		}
 
 		folio_clear_active(folio);	/* we are de-activating */
-		folio_set_workingset(folio);
+		folio_mark_workingset(folio);
 		list_add(&folio->lru, &l_inactive);
 	}
 

@@ -264,9 +264,6 @@ static inline bool folio_is_workingset(const struct folio *folio)
  * @folio: the folio.
  *
  * Force set a folio's LRU referenced count to LRU_REFS_WORKINGSET non-atomicly.
- *
- * Can be used to replace folio_set_workingset safely, just like
- * folio_is_workingset.
  */
 static inline void folio_mark_workingset(struct folio *folio)
 {

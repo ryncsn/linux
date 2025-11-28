@@ -572,7 +572,7 @@ void workingset_refault(struct folio *folio, void *shadow)
 
 	/* Folio was active prior to eviction */
 	if (workingset) {
-		folio_set_workingset(folio);
+		folio_mark_workingset(folio);
 		/*
 		 * XXX: Move to folio_add_lru() when it supports new vs
 		 * putback
