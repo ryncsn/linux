@@ -229,7 +229,7 @@ static void unpack_shadow(void *shadow, int *memcgidp, pg_data_t **pgdat,
 
 #ifdef CONFIG_LRU_GEN
 
-#define LRU_REFS_BITS (LRU_REFS_WIDTH + 1)
+#define LRU_REFS_BITS LRU_REFS_WIDTH
 
 static void *lru_gen_eviction(struct folio *folio)
 {
