@@ -178,7 +178,7 @@
  *               /      Eviction Info       \ /   Pack Info    \
  *              +----------------------------+-----------------+
  * non-MGLRU    |     eviction timestamp     | NID | MID | W |1|
- * MGLRU        |      seq number     | refs | NID | MID | W |1|
+ * MGLRU        | refs |  eviction timestamp | NID | MID | W |1|
  *                                              ^     ^    ^  ^
  *                NUMA node id (NODES_SHIFT) ---+     |    |  +-- XA_VALUE mark
  *          Memory Cgroup ID (MEM_CGROUP_ID_SHIFT) ---+    |
@@ -200,6 +200,8 @@
 #define LRU_INFO_BITS		(NODES_SHIFT + MEM_CGROUP_ID_SHIFT + \
 				 WORKINGSET_SHIFT)
 #define LRU_TIMESTAMP_BITS	(BITS_PER_XA_VALUE - LRU_INFO_BITS)
+#define LRU_REFS_BITS		(LRU_REFS_WIDTH)
+#define LRU_GEN_TIMESTAMP_BITS	(LRU_TIMESTAMP_BITS - LRU_REFS_BITS)
 
 /*
  * Eviction timestamps need to be able to cover the full range of
@@ -210,6 +212,7 @@
  * evictions into coarser buckets by shaving off lower timestamp bits.
  */
 static unsigned int bucket_order __read_mostly;
+static unsigned int lru_gen_bucket_order __read_mostly;
 
 static void *pack_shadow(int memcgid, pg_data_t *pgdat, unsigned long eviction,
 			 bool workingset)
@@ -365,13 +368,10 @@ static inline unsigned long lru_distance(struct lruvec *lruvec,
 
 #ifdef CONFIG_LRU_GEN
 
-#define LRU_REFS_BITS LRU_REFS_WIDTH
-
 static void *lru_gen_eviction(struct folio *folio)
 {
 	int hist;
 	unsigned long token;
-	unsigned long min_seq;
 	struct lruvec *lruvec;
 	struct lru_gen_folio *lrugen;
 	int type = folio_is_file_lru(folio);
@@ -381,70 +381,85 @@ static void *lru_gen_eviction(struct folio *folio)
 	struct mem_cgroup *memcg = folio_memcg(folio);
 	struct pglist_data *pgdat = folio_pgdat(folio);
 
-	BUILD_BUG_ON(LRU_GEN_WIDTH + LRU_REFS_BITS + LRU_INFO_BITS > BITS_PER_XA_VALUE);
+	BUILD_BUG_ON(LRU_GEN_TIMESTAMP_BITS + LRU_REFS_BITS + LRU_INFO_BITS >
+		     BITS_PER_XA_VALUE);
 
 	lruvec = mem_cgroup_lruvec(memcg, pgdat);
 	lrugen = &lruvec->lrugen;
-	min_seq = READ_ONCE(lrugen->min_seq[type]);
-	token = (min_seq << LRU_REFS_BITS) | refs >> 1;
+	hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
 
-	hist = lru_hist_from_seq(min_seq);
+	token = refs >> 1;
+	token <<= LRU_GEN_TIMESTAMP_BITS;
+	token |= lru_eviction(lruvec, delta,
+			      LRU_GEN_TIMESTAMP_BITS, lru_gen_bucket_order);
+
 	atomic_long_add(delta, &lrugen->evicted[hist][type][tier]);
 
 	return pack_shadow(mem_cgroup_id(memcg), pgdat, token, refs & 1);
 }
 
-/*
- * Tests if the shadow entry is for a folio that was recently evicted.
- */
-static bool lru_gen_test_recent(struct lruvec *lruvec, unsigned long token)
-{
-	unsigned long max_seq;
-
-	max_seq = READ_ONCE((lruvec)->lrugen.max_seq);
-	max_seq &= BIT(LRU_TIMESTAMP_BITS - LRU_REFS_WIDTH) - 1;
-
-	return abs_diff(max_seq, token >> LRU_REFS_WIDTH) < MAX_NR_GENS;
-}
-
 static void lru_gen_refault(struct folio *folio, void *shadow)
 {
 	bool recent;
-	int hist, tier, refs;
 	bool workingset;
-	unsigned long token;
+	unsigned long token, distance;
+	unsigned long recent_evicted = 0, total;
+	int hist, tier, refs;
 	struct lruvec *lruvec;
 	struct lru_gen_folio *lrugen;
 	int type = folio_is_file_lru(folio);
 	int delta = folio_nr_pages(folio);
 
-	lruvec = try_unpack_get_lruvec(shadow, &token, &workingset, false);
+	lruvec = try_unpack_get_lruvec(shadow, &token, &workingset, true);
 	if (!lruvec)
 		return;
 	if (lruvec != folio_lruvec(folio))
 		goto out_put;
 
-	recent = lru_gen_test_recent(lruvec, token);
 	mod_lruvec_state(lruvec, WORKINGSET_REFAULT_BASE + type, delta);
 
-	if (!recent)
-		goto out_put;
-
 	lrugen = &lruvec->lrugen;
-
 	hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
-	refs = (token & (BIT(LRU_REFS_BITS) - 1)) + workingset;
-	tier = lru_tier_from_refs(refs);
+	distance = lru_distance(lruvec, token,
+				LRU_GEN_TIMESTAMP_BITS, lru_gen_bucket_order);
 
-	atomic_long_add(delta, &lrugen->refaulted[hist][type][tier]);
+	for (tier = 0; tier < MAX_NR_TIERS; tier++)
+		recent_evicted += atomic_long_read(&lrugen->evicted[hist][type][tier]);
+	if (type)
+		total = lruvec_page_state(lruvec, NR_ACTIVE_FILE) +
+			lruvec_page_state(lruvec, NR_INACTIVE_FILE);
+	else
+		total = lruvec_page_state(lruvec, NR_ACTIVE_ANON) +
+			lruvec_page_state(lruvec, NR_INACTIVE_ANON);
+
+	/*
+	 * Return if it's neither recently evicted or doesn't fits in current
+	 * memory size
+	 */
+	recent = distance < recent_evicted;
+	if (!recent && distance > total)
+		goto out_put;
 
 	/* see folio_add_lru() where folio_set_active() will be called */
 	if (lru_gen_in_fault())
 		mod_lruvec_state(lruvec, WORKINGSET_ACTIVATE_BASE + type, delta);
 
-	if (refs) {
-		mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
+	refs = (token >> LRU_GEN_TIMESTAMP_BITS) + 1;
+	tier = lru_tier_from_refs(refs);
+	if (recent) {
+		atomic_long_add(delta, &lrugen->refaulted[hist][type][tier]);
+	} else {
+		atomic_long_add(delta, &lrugen->avg_total[type][tier]);
+		atomic_long_add(delta, &lrugen->avg_refaulted[type][tier]);
+	}
+
+	/*
+	 * Restore reference count and workingset. Workingset is cleared upon
+	 * protection, see folio_inc_gen.
+	 */
+	if (refs >= LRU_REFS_WORKINGSET) {
 		folio_set_lru_refs(folio, refs);
+		mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
 	}
 out_put:
 	put_lruvec(lruvec);
@@ -455,11 +470,6 @@ out_put:
 static void *lru_gen_eviction(struct folio *folio)
 {
 	return NULL;
-}
-
-static bool lru_gen_test_recent(struct lruvec *lruvec, unsigned long token)
-{
-	return false;
 }
 
 static void lru_gen_refault(struct folio *folio, void *shadow)
@@ -519,27 +529,34 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset,
 	unsigned long eviction;
 	unsigned long inactive;
 	unsigned long distance;
+	int bits, order;
 	bool recent;
 
+	eviction_lruvec = try_unpack_get_lruvec(shadow, &eviction, workingset, flush);
+	if (!eviction_lruvec)
+		return false;
+
 	if (lru_gen_enabled()) {
-		eviction_lruvec = try_unpack_get_lruvec(shadow, &eviction, workingset, false);
-		recent = lru_gen_test_recent(eviction_lruvec, eviction);
+		bits = LRU_GEN_TIMESTAMP_BITS;
+		order = lru_gen_bucket_order;
 	} else {
-		eviction_lruvec = try_unpack_get_lruvec(shadow, &eviction, workingset, flush);
-		distance = lru_distance(eviction_lruvec, eviction,
-					LRU_TIMESTAMP_BITS, bucket_order);
-		/*
-		 * Compare the distance to the existing workingset size. We
-		 * don't activate pages that couldn't stay resident even if
-		 * all the memory was available to the workingset. Whether
-		 * workingset competition needs to consider anon or not depends
-		 * on having free swap space.
-		 */
-		inactive = lruvec_page_state(eviction_lruvec, NR_INACTIVE_FILE);
-		if (mem_cgroup_get_nr_swap_pages(lruvec_memcg(eviction_lruvec)))
-			inactive += lruvec_page_state(eviction_lruvec, NR_INACTIVE_ANON);
-		recent = distance < inactive;
+		bits = LRU_TIMESTAMP_BITS;
+		order = bucket_order;
 	}
+
+	/*
+	 * Compare the distance to the existing workingset size. We
+	 * don't activate pages that couldn't stay resident even if
+	 * all the memory was available to the workingset. Whether
+	 * workingset competition needs to consider anon or not depends
+	 * on having free swap space.
+	 */
+	distance = lru_distance(eviction_lruvec, eviction, bits, order);
+	inactive = lruvec_page_state(eviction_lruvec, NR_INACTIVE_FILE);
+	if (mem_cgroup_get_nr_swap_pages(lruvec_memcg(eviction_lruvec)))
+		inactive += lruvec_page_state(eviction_lruvec,
+					      NR_INACTIVE_ANON);
+	recent = distance < inactive;
 	put_lruvec(eviction_lruvec);
 	return recent;
 }
@@ -804,6 +821,12 @@ static int __init workingset_init(void)
 		bucket_order = max_order - LRU_TIMESTAMP_BITS;
 	pr_info("workingset: timestamp_bits=%d max_order=%d bucket_order=%u\n",
 		LRU_TIMESTAMP_BITS, max_order, bucket_order);
+#ifdef CONFIG_LRU_GEN
+	if (max_order > LRU_GEN_TIMESTAMP_BITS)
+		lru_gen_bucket_order = max_order - LRU_GEN_TIMESTAMP_BITS;
+	pr_info("workingset: lru_gen_timestamp_bits=%d lru_gen_bucket_order=%u\n",
+		LRU_GEN_TIMESTAMP_BITS, lru_gen_bucket_order);
+#endif
 
 	workingset_shadow_shrinker = shrinker_alloc(SHRINKER_NUMA_AWARE |
 						    SHRINKER_MEMCG_AWARE,
