@@ -119,8 +119,7 @@ static inline int lru_refs_from_flags(unsigned long flags)
 	 * LRU_REFS_FLAGS.
 	 */
 	refs = (flags & BIT(PG_referenced)) ? BIT(0) : 0;
-	refs += (flags & BIT(PG_workingset)) ? BIT(1) : 0;
-	refs += ((flags & LRU_REFS_MASK) >> LRU_REFS_PGOFF) << 2;
+	refs += ((flags & LRU_REFS_MASK) >> LRU_REFS_PGOFF) << 1;
 	return refs;
 }
 
@@ -136,9 +135,7 @@ static inline void lru_refs_set_flags(unsigned long *flags, unsigned int refs)
 	*flags &= ~LRU_REFS_FLAGS;
 	if (refs & BIT(0))
 		*flags |= BIT(PG_referenced);
-	if (refs & BIT(1))
-		*flags |= BIT(PG_workingset);
-	*flags |= (refs >> 2) << LRU_REFS_PGOFF;
+	*flags |= (refs >> 1) << LRU_REFS_PGOFF;
 }
 
 static inline int folio_lru_refs(const struct folio *folio)
