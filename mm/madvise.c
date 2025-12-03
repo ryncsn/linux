@@ -341,6 +341,27 @@ static inline bool can_do_file_pageout(struct vm_area_struct *vma)
 	       file_permission(vma->vm_file, MAY_WRITE) == 0;
 }
 
+/*
+ * We are deactivating a folio for accelerating reclaiming.
+ * VM couldn't reclaim the folio unless we clear PG_young.
+ * As a side effect, it makes confuse idle-page tracking
+ * because they will miss recent referenced history.
+ */
+static void madvise_cold_or_pageout_prep_folio(struct folio *folio)
+{
+	folio_test_clear_young(folio);
+
+	/*
+	 * MGLRU clears all reference flags in folio_deactivate,
+	 * no need to touch it here.
+	 */
+	if (!lru_gen_enabled()) {
+		folio_clear_referenced(folio);
+		if (folio_test_active(folio))
+			folio_set_workingset(folio);
+	}
+}
+
 static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
 				unsigned long addr, unsigned long end,
 				struct mm_walk *walk)
@@ -415,9 +436,7 @@ static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
 		}
 
 		trace_android_vh_madvise_cold_or_pageout_page(pageout, page);
-		ClearPageReferenced(page);
-		test_and_clear_page_young(page);
-		if (pageout) {
+		madvise_cold_or_pageout_prep_folio(page_folio(page));		if (pageout) {
 			if (!isolate_lru_page(page)) {
 				if (PageUnevictable(page))
 					putback_lru_page(page);
@@ -523,9 +542,7 @@ regular_page:
 		 * because they will miss recent referenced history.
 		 */
 		trace_android_vh_madvise_cold_or_pageout_page(pageout, page);
-		ClearPageReferenced(page);
-		test_and_clear_page_young(page);
-		if (pageout) {
+		madvise_cold_or_pageout_prep_folio(page_folio(page));		if (pageout) {
 			if (!isolate_lru_page(page)) {
 				if (PageUnevictable(page))
 					putback_lru_page(page);
