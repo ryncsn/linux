@@ -615,7 +615,7 @@ unsigned long zone_reclaimable_pages(struct zone *zone)
 static unsigned long lruvec_lru_size(struct lruvec *lruvec, enum lru_list lru,
 				     int zone_idx)
 {
-	unsigned long size = 0;
+	long size = 0;
 	int zid;
 
 	for (zid = 0; zid <= zone_idx && zid < MAX_NR_ZONES; zid++) {
@@ -629,7 +629,7 @@ static unsigned long lruvec_lru_size(struct lruvec *lruvec, enum lru_list lru,
 		else
 			size += zone_page_state(zone, NR_ZONE_LRU_BASE + lru);
 	}
-	return size;
+	return max(size, 0);
 }
 
 /*
