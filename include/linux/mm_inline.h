@@ -142,7 +142,7 @@ static inline int lru_tier_from_refs(int refs, bool workingset)
 
 static inline int folio_lru_refs(const struct folio *folio)
 {
-	unsigned long flags = READ_ONCE(folio->flags.f);
+	unsigned long flags = READ_ONCE(*const_folio_flags(folio, 0));
 
 	if (!(flags & BIT(PG_referenced)))
 		return 0;
@@ -155,7 +155,7 @@ static inline int folio_lru_refs(const struct folio *folio)
 
 static inline int folio_lru_gen(const struct folio *folio)
 {
-	unsigned long flags = READ_ONCE(folio->flags.f);
+	unsigned long flags = READ_ONCE(*const_folio_flags(folio, 0));
 
 	return ((flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
 }
@@ -268,7 +268,7 @@ static inline bool lru_gen_add_folio(struct lruvec *lruvec, struct folio *folio,
 	gen = lru_gen_from_seq(seq);
 	flags = (gen + 1UL) << LRU_GEN_PGOFF;
 	/* see the comment on MIN_NR_GENS about PG_active */
-	set_mask_bits(&folio->flags.f, LRU_GEN_MASK | BIT(PG_active), flags);
+	set_mask_bits(folio_flags(folio, 0), LRU_GEN_MASK | BIT(PG_active), flags);
 
 	lru_gen_update_size(lruvec, folio, -1, gen);
 	/* for folio_rotate_reclaimable() */
@@ -293,7 +293,7 @@ static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio,
 
 	/* for folio_migrate_flags() */
 	flags = !reclaiming && lru_gen_is_active(lruvec, gen) ? BIT(PG_active) : 0;
-	flags = set_mask_bits(&folio->flags.f, LRU_GEN_MASK, flags);
+	flags = set_mask_bits(folio_flags(folio, 0), LRU_GEN_MASK, flags);
 	gen = ((flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
 
 	lru_gen_update_size(lruvec, folio, gen, -1);
@@ -304,9 +304,9 @@ static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio,
 
 static inline void folio_migrate_refs(struct folio *new, const struct folio *old)
 {
-	unsigned long refs = READ_ONCE(old->flags.f) & LRU_REFS_MASK;
+	unsigned long refs = READ_ONCE(*folio_flags(old, 0)) & LRU_REFS_MASK;
 
-	set_mask_bits(&new->flags.f, LRU_REFS_MASK, refs);
+	set_mask_bits(&folio_flags(new, 0), LRU_REFS_MASK, refs);
 }
 #else /* !CONFIG_LRU_GEN */
 
