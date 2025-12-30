@@ -202,11 +202,10 @@
 #define LRU_TIMESTAMP_BITS	(BITS_PER_XA_VALUE - LRU_INFO_BITS)
 
 /*
- * LRU refs uses LRU_REFS_WIDTH + 2 bits, the 2 bits are PG_workingset and
- * PG_referenced. But here we record PG_workingset seperately (to reuse
- * pack_shadow).
+ * LRU refs uses LRU_REFS_WIDTH + 1 bits, the 1 bit is for PG_workingset
+ * but here we record PG_workingset seperately (to reuse pack_shadow).
  */
-#define LRU_REFS_BITS ((LRU_REFS_WIDTH + 2) - 1)
+#define LRU_REFS_BITS ((LRU_REFS_WIDTH + 1) - 1)
 #define LRU_GEN_TIMESTAMP_BITS	(LRU_TIMESTAMP_BITS - LRU_REFS_BITS)
 
 /*
