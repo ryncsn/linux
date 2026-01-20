@@ -306,13 +306,14 @@ static void put_lruvec(struct lruvec *lruvec)
 /**
  * lru_eviction - notifies eviction of an folio on an lruvec
  * @lruvec: the lruvec the folio belongs to
+ * @type: file or anon.
  * @nr_pages: size of the folio
  *
  * As in-memory folio is evicted, increase the eviction counter on
  * the LRU and return its current reading.
  */
-static inline unsigned long lru_eviction(struct lruvec *lruvec, int nr_pages,
-					 int bits, int bucket_order)
+static inline unsigned long lru_eviction(struct lruvec *lruvec, int type,
+					 int nr_pages, int bits, int bucket_order)
 {
 	unsigned long eviction;
 
@@ -327,9 +328,9 @@ static inline unsigned long lru_eviction(struct lruvec *lruvec, int nr_pages,
 	 * the virtual inactive lists of all its parents, including
 	 * the root cgroup's, age as well.
 	 */
-	eviction = atomic_long_fetch_add_relaxed(nr_pages, &lruvec->evictions);
+	eviction = atomic_long_fetch_add_relaxed(nr_pages, &lruvec->evictions[type]);
 	while ((lruvec = parent_lruvec(lruvec)))
-		atomic_long_add(nr_pages, &lruvec->evictions);
+		atomic_long_add(nr_pages, &lruvec->evictions[type]);
 
 	/* Truncate the timestamp to fit in limited bits */
 	eviction >>= bucket_order;
@@ -345,14 +346,14 @@ static inline unsigned long lru_eviction(struct lruvec *lruvec, int nr_pages,
  * As in-memory folio is evicted, increase the eviction counter on
  * the LRU and return its current reading.
  */
-static inline unsigned long lru_distance(struct lruvec *lruvec,
-					 unsigned long eviction,
-					 int bits, int bucket_order)
+static inline unsigned long lru_distance(struct lruvec *lruvec, int type,
+					 unsigned long eviction, int bits,
+					 int bucket_order)
 {
 	unsigned long refault;
 
 	eviction <<= bucket_order;
-	refault = atomic_long_read(&lruvec->evictions);
+	refault = atomic_long_read(&lruvec->evictions[type]);
 
 	/*
 	 * The unsigned subtraction here gives an accurate distance
@@ -500,8 +501,8 @@ void *workingset_eviction(struct folio *folio, struct mem_cgroup *target_memcg)
 	lruvec = mem_cgroup_lruvec(target_memcg, pgdat);
 	/* XXX: target_memcg can be NULL, go through lruvec */
 	memcgid = mem_cgroup_private_id(lruvec_memcg(lruvec));
-	eviction = lru_eviction(lruvec, folio_nr_pages(folio),
-				LRU_TIMESTAMP_BITS, bucket_order);
+	eviction = lru_eviction(lruvec, folio_is_file_lru(folio),
+				folio_nr_pages(folio), LRU_TIMESTAMP_BITS, bucket_order);
 	return pack_shadow(memcgid, pgdat, eviction,
 			   folio_is_workingset(folio));
 }
@@ -532,7 +533,7 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset,
 		recent = lru_gen_test_recent(eviction_lruvec, eviction);
 	} else {
 		eviction_lruvec = try_unpack_get_lruvec(shadow, &eviction, workingset, flush);
-		distance = lru_distance(eviction_lruvec, eviction,
+		distance = lru_distance(eviction_lruvec, file, eviction,
 					LRU_TIMESTAMP_BITS, bucket_order);
 		/*
 		 * Compare the distance to the existing workingset size. We
