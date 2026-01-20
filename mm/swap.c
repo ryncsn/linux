@@ -307,9 +307,9 @@ static void lru_activate(struct lruvec *lruvec, struct folio *folio)
 	if (folio_test_active(folio) || folio_test_unevictable(folio))
 		return;
 
-
 	lruvec_del_folio(lruvec, folio);
 	folio_set_active(folio);
+	folio_set_lru_refs(folio, LRU_REFS_WORKINGSET);
 	lruvec_add_folio(lruvec, folio);
 	trace_mm_lru_activate(folio);
 
@@ -386,9 +386,13 @@ static void __lru_cache_activate_folio(struct folio *folio)
 
 #ifdef CONFIG_LRU_GEN
 
-static void lru_gen_inc_refs(struct folio *folio)
+static void folio_inc_lru_refs(struct folio *folio)
 {
 	unsigned long new_flags, old_flags = READ_ONCE(*folio_flags(folio, 0));
+	int type = folio_is_file_lru(folio);
+	struct lru_gen_folio *lrugen;
+	int new_gen, old_gen, max_gen, min_gen;
+	bool isolated = false;
 	int refs;
 
 	if (folio_test_unevictable(folio))
@@ -397,18 +401,45 @@ static void lru_gen_inc_refs(struct folio *folio)
 	/* see the comment on LRU_REFS_FLAGS */
 	do {
 		new_flags = old_flags;
+		old_gen = lru_gen_from_flags(old_flags);
+		new_gen = old_gen;
+
+		/* Always inc the refs number by one. */
 		refs = lru_refs_from_flags(old_flags);
-		if (refs == LRU_REFS_MAX) {
-			if (!folio_test_workingset(folio))
-				folio_set_workingset(folio);
-			return;
+		if (refs < LRU_REFS_WORKINGSET || old_gen < 0) {
+			refs = min(refs + 1, LRU_REFS_MAX);
+			goto out;
 		}
-		if (!folio_lru_refs(folio)) {
-			folio_set_lru_refs(folio, 1);
-			return;
+
+		/* Try to promote frequently used on LRU folios */
+		if (isolated || folio_test_clear_lru(folio)) {
+			isolated = true;
+			lrugen = &folio_lruvec(folio)->lrugen;
+			old_flags &= ~(BIT(PG_lru));
+			refs += 1;
+
+			if (refs > LRU_REFS_MAX) {
+				refs = LRU_REFS_PROTECTED;
+				max_gen = lru_gen_from_seq(READ_ONCE(lrugen->max_seq));
+				if (old_gen == max_gen)
+					goto out;
+			} else {
+				min_gen = lru_gen_from_seq(READ_ONCE(lrugen->min_seq[type]));
+				if (old_gen != min_gen)
+					goto out;
+			}
+
+			new_gen = (old_gen + 1UL) % MAX_NR_GENS;
+			lru_gen_set_flags(&new_flags, new_gen);
 		}
-		lru_refs_set_flags(&new_flags, refs + 1);
+out:
+		lru_refs_set_flags(&new_flags, refs);
+		if (isolated)
+			new_flags |= BIT(PG_lru);
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
+
+	if (new_gen != old_gen)
+		lru_gen_update_size(folio_lruvec(folio), folio, old_gen, new_gen);
 }
 
 static bool lru_gen_clear_refs(struct folio *folio)
@@ -421,7 +452,6 @@ static bool lru_gen_clear_refs(struct folio *folio)
 		return true;
 
 	folio_set_lru_refs(folio, 0);
-	folio_clear_workingset(folio);
 
 	lrugen = &folio_lruvec(folio)->lrugen;
 	/* whether can do without shuffling under the LRU lock */
@@ -430,7 +460,7 @@ static bool lru_gen_clear_refs(struct folio *folio)
 
 #else /* !CONFIG_LRU_GEN */
 
-static void lru_gen_inc_refs(struct folio *folio)
+static void folio_inc_lru_refs(struct folio *folio)
 {
 }
 
@@ -459,7 +489,7 @@ void folio_mark_accessed(struct folio *folio)
 	if (folio_test_dropbehind(folio))
 		return;
 	if (lru_gen_enabled()) {
-		lru_gen_inc_refs(folio);
+		folio_inc_lru_refs(folio);
 		return;
 	}
 
