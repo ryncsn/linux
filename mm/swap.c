@@ -59,6 +59,7 @@ struct cpu_fbatches {
 	struct folio_batch lru_lazyfree;
 #ifdef CONFIG_SMP
 	struct folio_batch lru_activate;
+	struct folio_batch lru_promote;
 #endif
 	/* Protecting the following batches which require disabling interrupts */
 	local_lock_t lock_irq;
@@ -307,7 +308,6 @@ static void lru_activate(struct lruvec *lruvec, struct folio *folio)
 	if (folio_test_active(folio) || folio_test_unevictable(folio))
 		return;
 
-
 	lruvec_del_folio(lruvec, folio);
 	folio_set_active(folio);
 	lruvec_add_folio(lruvec, folio);
@@ -389,9 +389,10 @@ static void __lru_cache_activate_folio(struct folio *folio)
 static void folio_inc_lru_refs(struct folio *folio)
 {
 	unsigned long new_flags, old_flags = READ_ONCE(*folio_flags(folio, 0));
-	int new_gen, old_gen, max_gen, min_gen;
 	int type = folio_is_file_lru(folio);
 	struct lru_gen_folio *lrugen;
+	int new_gen, old_gen, max_gen, min_gen;
+	bool isolated = false;
 	int refs;
 
 	if (folio_test_unevictable(folio))
@@ -401,36 +402,50 @@ static void folio_inc_lru_refs(struct folio *folio)
 	do {
 		old_gen = lru_gen_from_flags(old_flags);
 		refs = lru_refs_from_flags(old_flags);
-		new_flags = old_flags;
 		new_gen = old_gen;
 		if (refs == LRU_REFS_MAX) {
-			/* Promote to next gen if lru_refs is full */
-			if (old_gen >= 0) {
-				lrugen = &folio_lruvec(folio)->lrugen;
-				max_gen = lru_gen_from_seq(READ_ONCE(lrugen->max_seq));
-				if (old_gen != max_gen)
-					new_gen = (old_gen + 1UL) % MAX_NR_GENS;
-			}
-		} else if (refs >= LRU_REFS_REFERENCED) {
-			/* Promote workingset folio to second oldest gen */
-			if (old_gen >= 0) {
-				lrugen = &folio_lruvec(folio)->lrugen;
-				min_gen = lru_gen_from_seq(READ_ONCE(lrugen->min_seq[type]));
-				if (old_gen == min_gen)
-					new_gen = (old_gen + 1UL) % MAX_NR_GENS;
-			}
-		}
+			/* Try to promote frequently used folios */
+			if (old_gen < 0 || (!isolated && !folio_test_clear_lru(folio)))
+				goto out;
 
-		if (new_gen == old_gen) {
-			lru_refs_set_flags(&new_flags, min(refs + 1, LRU_REFS_MAX));
-		} else {
+			isolated = true;
+			lrugen = &folio_lruvec(folio)->lrugen;
+			max_gen = lru_gen_from_seq(READ_ONCE(lrugen->max_seq));
+			if (old_gen == max_gen)
+				goto out;
+
+			old_flags &= ~(BIT(PG_lru));
+			new_gen = (old_gen + 1UL) % MAX_NR_GENS;
+			new_flags = old_flags;
 			lru_gen_set_flags(&new_flags, new_gen);
 			lru_refs_set_flags(&new_flags, LRU_REFS_WORKINGSET);
+		} else if (refs >= LRU_REFS_REFERENCED) {
+			/* Promote workingset folio to second oldest gen */
+			if (old_gen < 0 || (!isolated && !folio_test_clear_lru(folio)))
+				goto out;
+
+			isolated = true;
+			lrugen = &folio_lruvec(folio)->lrugen;
+			min_gen = lru_gen_from_seq(READ_ONCE(lrugen->min_seq[type]));
+			if (old_gen != min_gen)
+				goto out;
+
+			old_flags &= ~(BIT(PG_lru));
+			new_gen = (old_gen + 1UL) % MAX_NR_GENS;
+			new_flags = old_flags;
+			lru_gen_set_flags(&new_flags, new_gen);
+			lru_refs_set_flags(&new_flags, refs + 1);
+		} else {
+			new_flags = old_flags;
+			lru_refs_set_flags(&new_flags, refs + 1);
 		}
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
 	if (new_gen != old_gen)
 		lru_gen_update_size(folio_lruvec(folio), folio, old_gen, new_gen);
+out:
+	if (isolated)
+		folio_set_lru(folio);
 }
 
 static bool lru_gen_clear_refs(struct folio *folio)

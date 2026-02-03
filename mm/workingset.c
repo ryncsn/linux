@@ -283,7 +283,7 @@ static bool lru_gen_test_recent(void *shadow, struct lruvec **lruvec,
 	max_seq = READ_ONCE((*lruvec)->lrugen.max_seq);
 	max_seq &= EVICTION_MASK >> LRU_REFS_BITS;
 
-	return abs_diff(max_seq, *token >> LRU_REFS_BITS) < MAX_NR_GENS;
+	return abs_diff(max_seq, *token >> LRU_REFS_BITS) < MAX_NR_GENS * 64;
 }
 
 static void lru_gen_refault(struct folio *folio, void *shadow)
@@ -317,12 +317,13 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
 	atomic_long_add(delta, &lrugen->refaulted[hist][type][tier]);
 
 	/* see folio_add_lru() where folio_set_active() will be called */
-	if (lru_gen_in_fault())
+	if (refs == LRU_REFS_MAX) {
+		folio_set_active(folio);
 		mod_lruvec_state(lruvec, WORKINGSET_ACTIVATE_BASE + type, delta);
-
+	}
 	if (refs) {
-		mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
 		folio_set_lru_refs(folio, refs);
+		mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
 	}
 unlock:
 	rcu_read_unlock();

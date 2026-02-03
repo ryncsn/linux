@@ -293,10 +293,12 @@ static inline unsigned long lru_gen_folio_seq(const struct lruvec *lruvec,
 					      const struct folio *folio,
 					      bool reclaiming)
 {
-	int distance;
+	int gen;
 	int refs = folio_lru_refs(folio);
 	int type = folio_is_file_lru(folio);
 	const struct lru_gen_folio *lrugen = &lruvec->lrugen;
+
+	lockdep_assert_held(&lruvec->lru_lock);
 
 	/*
 	 * +-------------------------------------------+------------------------------------------+
@@ -310,18 +312,18 @@ static inline unsigned long lru_gen_folio_seq(const struct lruvec *lruvec,
 	 * |<-------------- MIN_NR_GENS -------------->|                                          |
 	 * |<------------------------------------ MAX_NR_GENS ----------------------------------->|
 	 */
-	if (folio_test_active(folio))
-		distance = MIN_NR_GENS - (refs >= LRU_REFS_WORKINGSET);
-	else if (reclaiming)
-		distance = MAX_NR_GENS;
+	if (reclaiming)
+		gen = MAX_NR_GENS;
+	else if (folio_test_active(folio))
+		gen = MIN_NR_GENS - (refs >= LRU_REFS_WORKINGSET);
 	else if ((!folio_is_file_lru(folio) && !folio_test_swapcache(folio)) ||
 		 (folio_test_reclaim(folio) &&
 		  (folio_test_dirty(folio) || folio_test_writeback(folio))))
-		distance = MIN_NR_GENS;
+		gen = MAX_NR_GENS - 1;
 	else
-		distance = MAX_NR_GENS - (refs >= LRU_REFS_WORKINGSET);
+		gen = MAX_NR_GENS - (refs >= LRU_REFS_WORKINGSET);
 
-	return max(READ_ONCE(lrugen->max_seq) - distance + 1, READ_ONCE(lrugen->min_seq[type]));
+	return max(READ_ONCE(lrugen->max_seq) - gen + 1, READ_ONCE(lrugen->min_seq[type]));
 }
 
 static inline bool lru_gen_add_folio(struct lruvec *lruvec, struct folio *folio, bool reclaiming)

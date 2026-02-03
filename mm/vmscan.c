@@ -5712,8 +5712,19 @@ void lru_gen_exit_memcg(struct mem_cgroup *memcg)
 		struct lruvec *lruvec = get_lruvec(memcg, nid);
 		struct lru_gen_mm_state *mm_state = get_mm_state(lruvec);
 
-		VM_WARN_ON_ONCE(memchr_inv(lruvec->lrugen.nr_pages, 0,
-					   sizeof(lruvec->lrugen.nr_pages)));
+		if (memchr_inv(lruvec->lrugen.nr_pages, 0,
+					sizeof(lruvec->lrugen.nr_pages))) {
+			for (int gen = 0; gen < MAX_NR_GENS; gen++) {
+				pr_err("%10d: anon: ", gen);
+				for (int zone = 0; zone < MAX_NR_ZONES; zone++)
+					pr_err("%10ld ", lruvec->lrugen.nr_pages[gen][0][zone]);
+				pr_err("file: ");
+				for (int zone = 0; zone < MAX_NR_ZONES; zone++)
+					pr_err("%10ld ", lruvec->lrugen.nr_pages[gen][1][zone]);
+				pr_err("\n");
+			}
+			WARN_ON(1);
+		}
 
 		lruvec->lrugen.list.next = LIST_POISON1;
 
