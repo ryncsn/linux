@@ -446,6 +446,7 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
 	hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
 	distance = lru_distance(lruvec, type, token,
 				LRU_GEN_TIMESTAMP_BITS, lru_gen_bucket_order);
+	recent = lru_gen_test_recent(lruvec, type, distance);
 
 	if (type)
 		total = lruvec_page_state(lruvec, NR_ACTIVE_FILE) +
@@ -458,14 +459,14 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
 	 * Return if it's neither recently evicted or doesn't fits in current
 	 * memory size
 	 */
-	if (recent && distance > total / MIN_NR_GENS)
+	if (!recent && distance > total)
 		goto out_put;
 
-	refs = ((token >> LRU_GEN_TIMESTAMP_BITS) << 1) + 1;
+	refs = ((token >> LRU_GEN_TIMESTAMP_BITS) << 1) + workingset;
 	tier = lru_tier_from_refs(refs);
 
 	/* If the folio is very frequently used, activate it. */
-	if (refs == LRU_REFS_MAX) {
+	if (refs + lru_gen_in_fault() > LRU_REFS_WORKINGSET) {
 		folio_set_active(folio);
 		mod_lruvec_state(lruvec, WORKINGSET_ACTIVATE_BASE + type, delta);
 	}
