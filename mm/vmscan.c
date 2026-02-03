@@ -3320,8 +3320,7 @@ static void reset_batch_size(struct lru_gen_mm_walk *walk)
 			continue;
 
 		walk->nr_pages[gen][type][zone] = 0;
-		WRITE_ONCE(lrugen->nr_pages[gen][type][zone],
-			   lrugen->nr_pages[gen][type][zone] + delta);
+		atomic_long_add(delta, &lrugen->nr_pages[gen][type][zone]);
 
 		if (lru_gen_is_active(lruvec, gen))
 			lru += LRU_ACTIVE;
@@ -3993,11 +3992,12 @@ restart:
 	prev = lru_gen_from_seq(lrugen->max_seq - 1);
 	next = lru_gen_from_seq(lrugen->max_seq + 1);
 
+	/* TODO: */
 	for (type = 0; type < ANON_AND_FILE; type++) {
 		for (zone = 0; zone < MAX_NR_ZONES; zone++) {
 			enum lru_list lru = type * LRU_INACTIVE_FILE;
-			long delta = lrugen->nr_pages[prev][type][zone] -
-				     lrugen->nr_pages[next][type][zone];
+			long delta = atomic_long_read(&lrugen->nr_pages[prev][type][zone]) -
+				     atomic_long_read(&lrugen->nr_pages[next][type][zone]);
 
 			if (!delta)
 				continue;
@@ -4120,7 +4120,7 @@ static bool lruvec_is_sizable(struct lruvec *lruvec, struct scan_control *sc)
 			gen = lru_gen_from_seq(seq);
 
 			for (zone = 0; zone < MAX_NR_ZONES; zone++)
-				total += max(READ_ONCE(lrugen->nr_pages[gen][type][zone]), 0L);
+				total += max(atomic_long_read(&lrugen->nr_pages[gen][type][zone]), 0L);
 		}
 	}
 
@@ -4790,7 +4790,7 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 			gen = lru_gen_from_seq(seq);
 
 			for (zone = 0; zone < MAX_NR_ZONES; zone++)
-				size += max(READ_ONCE(lrugen->nr_pages[gen][type][zone]), 0L);
+				size += max(atomic_long_read(&lrugen->nr_pages[gen][type][zone]), 0L);
 		}
 	}
 
@@ -5444,7 +5444,7 @@ static int lru_gen_seq_show(struct seq_file *m, void *v)
 			char mark = full && seq < min_seq[type] ? 'x' : ' ';
 
 			for (zone = 0; zone < MAX_NR_ZONES; zone++)
-				size += max(READ_ONCE(lrugen->nr_pages[gen][type][zone]), 0L);
+				size += max(atomic_long_read(&lrugen->nr_pages[gen][type][zone]), 0L);
 
 			seq_printf(m, " %10lu%c", size, mark);
 		}
@@ -5717,10 +5717,10 @@ void lru_gen_exit_memcg(struct mem_cgroup *memcg)
 			for (int gen = 0; gen < MAX_NR_GENS; gen++) {
 				pr_err("%10d: anon: ", gen);
 				for (int zone = 0; zone < MAX_NR_ZONES; zone++)
-					pr_err("%10ld ", lruvec->lrugen.nr_pages[gen][0][zone]);
+					pr_err("%10ld ", atomic_long_read(&lruvec->lrugen.nr_pages[gen][0][zone]));
 				pr_err("file: ");
 				for (int zone = 0; zone < MAX_NR_ZONES; zone++)
-					pr_err("%10ld ", lruvec->lrugen.nr_pages[gen][1][zone]);
+					pr_err("%10ld ", atomic_long_read(&lruvec->lrugen.nr_pages[gen][1][zone]));
 				pr_err("\n");
 			}
 			WARN_ON(1);
