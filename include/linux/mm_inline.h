@@ -178,6 +178,10 @@ static inline int lru_refs_from_flags(unsigned long flags)
 {
 	if (!(flags & BIT(PG_referenced)))
 		return 0;
+
+	if (flags & BIT(PG_readahead))
+		return 0;
+
 	/*
 	 * Return the total number of accesses including PG_referenced. Also see
 	 * the comment on LRU_REFS_FLAGS.
