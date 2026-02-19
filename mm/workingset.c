@@ -178,7 +178,7 @@
  *               /      Eviction Info       \ /   Pack Info    \
  *              +----------------------------+-----------------+
  * non-MGLRU    |     eviction timestamp     | NID | MID | W |1|
- * MGLRU        |      seq number     | refs | NID | MID | W |1|
+ * MGLRU        | refs |  eviction timestamp | NID | MID | W |1|
  *                                              ^     ^    ^  ^
  *                NUMA node id (NODES_SHIFT) ---+     |    |  +-- XA_VALUE mark
  *          Memory Cgroup ID (MEM_CGROUP_ID_SHIFT) ---+    |
@@ -207,6 +207,7 @@
  * pack_shadow).
  */
 #define LRU_REFS_BITS ((LRU_REFS_WIDTH + 2) - 1)
+#define LRU_GEN_TIMESTAMP_BITS	(LRU_TIMESTAMP_BITS - LRU_REFS_BITS)
 
 /*
  * Eviction timestamps need to be able to cover the full range of
@@ -217,6 +218,7 @@
  * evictions into coarser buckets by shaving off lower timestamp bits.
  */
 static unsigned int bucket_order __read_mostly;
+static unsigned int lru_gen_bucket_order __read_mostly;
 
 static void *pack_shadow(int memcgid, pg_data_t *pgdat, unsigned long eviction,
 			 bool workingset)
@@ -378,7 +380,6 @@ static void *lru_gen_eviction(struct folio *folio)
 {
 	int hist;
 	unsigned long token;
-	unsigned long min_seq;
 	struct lruvec *lruvec;
 	struct lru_gen_folio *lrugen;
 	int type = folio_is_file_lru(folio);
@@ -388,14 +389,17 @@ static void *lru_gen_eviction(struct folio *folio)
 	struct mem_cgroup *memcg = folio_memcg(folio);
 	struct pglist_data *pgdat = folio_pgdat(folio);
 
-	BUILD_BUG_ON(LRU_GEN_WIDTH + LRU_REFS_BITS + LRU_INFO_BITS > BITS_PER_XA_VALUE);
+	BUILD_BUG_ON(LRU_GEN_TIMESTAMP_BITS + LRU_REFS_BITS + LRU_INFO_BITS >
+		     BITS_PER_XA_VALUE);
 
 	lruvec = mem_cgroup_lruvec(memcg, pgdat);
 	lrugen = &lruvec->lrugen;
-	min_seq = READ_ONCE(lrugen->min_seq[type]);
-	token = (min_seq << LRU_REFS_BITS) | refs >> 1;
+	hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
 
-	hist = lru_hist_from_seq(min_seq);
+	token = refs >> 1;
+	token <<= LRU_GEN_TIMESTAMP_BITS;
+	token |= lru_eviction(lruvec, type, delta,
+			      LRU_GEN_TIMESTAMP_BITS, lru_gen_bucket_order);
 	atomic_long_add(delta, &lrugen->evicted[hist][type][tier]);
 
 	return pack_shadow(mem_cgroup_private_id(memcg), pgdat, token, refs & 1);
@@ -404,54 +408,84 @@ static void *lru_gen_eviction(struct folio *folio)
 /*
  * Tests if the shadow entry is for a folio that was recently evicted.
  */
-static bool lru_gen_test_recent(struct lruvec *lruvec, unsigned long token)
+static bool lru_gen_test_recent(struct lruvec *lruvec, int type,
+				unsigned long distance)
 {
-	unsigned long max_seq;
+	struct lru_gen_folio *lrugen;
+	unsigned long recent = 0;
+	int hist, tier;
 
-	max_seq = READ_ONCE((lruvec)->lrugen.max_seq);
-	max_seq &= BIT(LRU_TIMESTAMP_BITS - LRU_REFS_WIDTH) - 1;
+	lrugen = &lruvec->lrugen;
 
-	return abs_diff(max_seq, token >> LRU_REFS_WIDTH) < MAX_NR_GENS;
+	hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
+	for (tier = 0; tier < MAX_NR_TIERS; tier++)
+		recent += atomic_long_read(&lrugen->evicted[hist][type][tier]);
+
+	return distance <= recent;
 }
 
 static void lru_gen_refault(struct folio *folio, void *shadow)
 {
 	bool recent;
-	int hist, tier, refs;
 	bool workingset;
-	unsigned long token;
+	int hist, tier, refs;
 	struct lruvec *lruvec;
 	struct lru_gen_folio *lrugen;
 	int type = folio_is_file_lru(folio);
 	int delta = folio_nr_pages(folio);
+	unsigned long token, distance, total;
 
-	lruvec = try_unpack_get_lruvec(shadow, &token, &workingset, false);
+	lruvec = try_unpack_get_lruvec(shadow, &token, &workingset, true);
 	if (!lruvec)
 		return;
 	if (lruvec != folio_lruvec(folio))
 		goto out_put;
 
-	recent = lru_gen_test_recent(lruvec, token);
 	mod_lruvec_state(lruvec, WORKINGSET_REFAULT_BASE + type, delta);
 
-	if (!recent)
+	lrugen = &lruvec->lrugen;
+	hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
+	distance = lru_distance(lruvec, type, token,
+				LRU_GEN_TIMESTAMP_BITS, lru_gen_bucket_order);
+	recent = lru_gen_test_recent(lruvec, type, distance);
+
+	if (type)
+		total = lruvec_page_state(lruvec, NR_ACTIVE_FILE) +
+			lruvec_page_state(lruvec, NR_INACTIVE_FILE);
+	else
+		total = lruvec_page_state(lruvec, NR_ACTIVE_ANON) +
+			lruvec_page_state(lruvec, NR_INACTIVE_ANON);
+
+	/*
+	 * Return if it's neither recently evicted or doesn't fits in current
+	 * memory size
+	 */
+	if (!recent && distance > total)
 		goto out_put;
 
-	lrugen = &lruvec->lrugen;
-
-	hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
-	refs = ((token & (BIT(LRU_REFS_BITS) - 1)) << 1) + workingset;
+	refs = ((token >> LRU_GEN_TIMESTAMP_BITS) << 1) + workingset;
 	tier = lru_tier_from_refs(refs);
-
-	atomic_long_add(delta, &lrugen->refaulted[hist][type][tier]);
 
 	/* see folio_add_lru() where folio_set_active() will be called */
 	if (lru_gen_in_fault())
 		mod_lruvec_state(lruvec, WORKINGSET_ACTIVATE_BASE + type, delta);
 
+	/* Restore reference count. */
 	if (refs) {
 		folio_set_lru_refs(folio, refs);
 		mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
+	}
+
+	/*
+	 * If it's recently evicted, update the recent gen's counter. Else,
+	 * update the global counter, increase total too to avoid having
+	 * a refault rate > 1.
+	 */
+	if (recent) {
+		atomic_long_add(delta, &lrugen->refaulted[hist][type][tier]);
+	} else {
+		atomic_long_add(delta, &lrugen->avg_total[type][tier]);
+		atomic_long_add(delta, &lrugen->avg_refaulted[type][tier]);
 	}
 out_put:
 	put_lruvec(lruvec);
@@ -464,9 +498,9 @@ static void *lru_gen_eviction(struct folio *folio)
 	return NULL;
 }
 
-static bool lru_gen_test_recent(struct lruvec *lruvec, unsigned long token)
+static bool lru_gen_test_recent(struct lruvec *lruvec, int type,
+				unsigned long distance)
 {
-	return false;
 }
 
 static void lru_gen_refault(struct folio *folio, void *shadow)
@@ -522,6 +556,7 @@ void *workingset_eviction(struct folio *folio, struct mem_cgroup *target_memcg)
 bool workingset_test_recent(void *shadow, bool file, bool *workingset,
 			    bool flush)
 {
+
 	struct lruvec *eviction_lruvec;
 	unsigned long eviction;
 	unsigned long inactive;
@@ -530,7 +565,9 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset,
 
 	if (lru_gen_enabled()) {
 		eviction_lruvec = try_unpack_get_lruvec(shadow, &eviction, workingset, false);
-		recent = lru_gen_test_recent(eviction_lruvec, eviction);
+		distance = lru_distance(eviction_lruvec, file, eviction,
+					LRU_GEN_TIMESTAMP_BITS, lru_gen_bucket_order);
+		recent = lru_gen_test_recent(eviction_lruvec, file, distance);
 	} else {
 		eviction_lruvec = try_unpack_get_lruvec(shadow, &eviction, workingset, flush);
 		distance = lru_distance(eviction_lruvec, file, eviction,
@@ -811,6 +848,12 @@ static int __init workingset_init(void)
 		bucket_order = max_order - LRU_TIMESTAMP_BITS;
 	pr_info("workingset: timestamp_bits=%d max_order=%d bucket_order=%u\n",
 		LRU_TIMESTAMP_BITS, max_order, bucket_order);
+#ifdef CONFIG_LRU_GEN
+	if (max_order > LRU_GEN_TIMESTAMP_BITS)
+		lru_gen_bucket_order = max_order - LRU_GEN_TIMESTAMP_BITS;
+	pr_info("workingset: lru_gen_timestamp_bits=%d lru_gen_bucket_order=%u\n",
+		LRU_GEN_TIMESTAMP_BITS, lru_gen_bucket_order);
+#endif
 
 	workingset_shadow_shrinker = shrinker_alloc(SHRINKER_NUMA_AWARE |
 						    SHRINKER_MEMCG_AWARE,
