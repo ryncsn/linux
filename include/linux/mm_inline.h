@@ -134,10 +134,10 @@ static inline int lru_hist_from_seq(unsigned long seq)
 
 static inline int lru_tier_from_refs(unsigned int refs)
 {
-	if (refs <= LRU_REFS_WORKINGSET)
+	if (refs < LRU_REFS_WORKINGSET)
 		return 0;
 
-	return fls(refs - LRU_REFS_WORKINGSET);
+	return fls(refs - 1);
 }
 
 /**
