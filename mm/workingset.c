@@ -66,12 +66,12 @@
  * thrashing on the inactive list, after which refaulting pages can be
  * activated optimistically to compete with the existing active pages.
  *
- * For such approximation, we introduce a counter `nonresistence_age` (NA)
+ * For such approximation, we have a `evictions` count for each LRU (E)
  * here. This counter increases each time a page is evicted, and each evicted
  * page will have a shadow that stores the counter reading at the eviction
  * time as a timestamp. So when an evicted page was faulted again, we have:
  *
- *   Let SP = ((NA's reading @ current) - (NA's reading @ eviction))
+ *   Let SP = ((E's reading @ current) - (E's reading @ eviction))
  *
  *                            +-memory available to cache-+
  *                            |                           |
@@ -161,7 +161,7 @@
  *		Implementation
  *
  * For each node's LRU lists, a counter for inactive evictions and
- * activations is maintained (node->nonresident_age).
+ * activations is maintained (node->evictions).
  *
  * On eviction, a snapshot of this counter (along with some bits to
  * identify the node) is stored in the now empty page cache
@@ -370,7 +370,7 @@ static void workingset_age_nonresident(struct lruvec *lruvec, unsigned long nr_p
 	 * the root cgroup's, age as well.
 	 */
 	do {
-		atomic_long_add(nr_pages, &lruvec->nonresident_age);
+		atomic_long_add(nr_pages, &lruvec->evictions);
 	} while ((lruvec = parent_lruvec(lruvec)));
 }
 
@@ -401,7 +401,7 @@ void *workingset_eviction(struct folio *folio, struct mem_cgroup *target_memcg)
 	lruvec = mem_cgroup_lruvec(target_memcg, pgdat);
 	/* XXX: target_memcg can be NULL, go through lruvec */
 	memcgid = mem_cgroup_private_id(lruvec_memcg(lruvec));
-	eviction = atomic_long_read(&lruvec->nonresident_age);
+	eviction = atomic_long_read(&lruvec->evictions);
 	eviction >>= bucket_order[file];
 	workingset_age_nonresident(lruvec, folio_nr_pages(folio));
 	return pack_shadow(memcgid, pgdat, eviction,
@@ -483,17 +483,17 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset,
 		mem_cgroup_flush_stats_ratelimited(eviction_memcg);
 
 	eviction_lruvec = mem_cgroup_lruvec(eviction_memcg, pgdat);
-	refault = atomic_long_read(&eviction_lruvec->nonresident_age);
+	refault = atomic_long_read(&eviction_lruvec->evictions);
 
 	/*
 	 * Calculate the refault distance
 	 *
 	 * The unsigned subtraction here gives an accurate distance
-	 * across nonresident_age overflows in most cases. There is a
+	 * across evictions overflows in most cases. There is a
 	 * special case: usually, shadow entries have a short lifetime
 	 * and are either refaulted or reclaimed along with the inode
 	 * before they get too old.  But it is not impossible for the
-	 * nonresident_age to lap a shadow entry in the field, which
+	 * evictions to lap a shadow entry in the field, which
 	 * can then result in a false small refault distance, leading
 	 * to a false activation should this old entry actually
 	 * refault again.  However, earlier kernels used to deactivate
