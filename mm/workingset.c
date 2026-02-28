@@ -541,7 +541,8 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset,
 		mem_cgroup_flush_stats_ratelimited(eviction_memcg);
 
 	distance = lru_distance(eviction_lruvec, eviction,
-				LRU_TIMESTAMP_BITS, bucket_order);
+				file ? LRU_EVICT_BITS : LRU_EVICT_BITS_ANON,
+				bucket_order[file]);
 
 	/*
 	 * Compare the distance to the existing workingset size. We
