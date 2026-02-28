@@ -202,11 +202,10 @@
 #define LRU_EVICT_BITS_ANON	(LRU_EVICT_BITS - SWAP_COUNT_SHIFT)
 
 /*
- * LRU refs uses LRU_REFS_WIDTH + 2 bits, the 2 bits are PG_workingset and
- * PG_referenced. But here we record PG_workingset separately (to reuse
- * pack_shadow).
+ * LRU refs uses LRU_REFS_WIDTH + 1 bit, the 1 bit is PG_workingset.
+ * But here we record PG_workingset separately (to reuse pack_shadow).
  */
-#define LRU_REFS_BITS		((LRU_REFS_WIDTH + 2) - 1)
+#define LRU_REFS_BITS		((LRU_REFS_WIDTH + 1) - 1)
 #define LRU_GEN_EVICT_BITS	(LRU_EVICT_BITS - LRU_REFS_BITS)
 #define LRU_GEN_EVICT_BITS_ANON	(LRU_EVICT_BITS_ANON - LRU_REFS_BITS)
 #define LRU_EVICT_BITS_MIN	LRU_GEN_EVICT_BITS_ANON

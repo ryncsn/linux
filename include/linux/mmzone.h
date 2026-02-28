@@ -554,8 +554,8 @@ enum lruvec_flags {
 #define LRU_GEN_MASK		((BIT(LRU_GEN_WIDTH) - 1) << LRU_GEN_PGOFF)
 #define LRU_GEN_MAX		(BIT(LRU_GEN_WIDTH - 1) - 1)
 #define LRU_REFS_MASK		((BIT(LRU_REFS_WIDTH) - 1) << LRU_REFS_PGOFF)
-#define LRU_REFS_FLAGS		(LRU_REFS_MASK | BIT(PG_referenced))
-#define LRU_REFS_MAX		(BIT(LRU_REFS_WIDTH + 1) - 1)
+#define LRU_REFS_FLAGS		LRU_REFS_MASK
+#define LRU_REFS_MAX		(BIT(LRU_REFS_WIDTH) - 1)
 
 struct lruvec;
 struct page_vma_mapped_walk;
