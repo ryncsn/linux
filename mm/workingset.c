@@ -488,7 +488,7 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset,
 	if (lru_gen_enabled()) {
 		bool recent;
 
-		recent = lru_gen_test_recent(eviction_lruvec, eviction);
+		recent = lru_gen_test_recent(eviction_lruvec, eviction, file);
 		mem_cgroup_put(eviction_memcg);
 		return recent;
 	}
