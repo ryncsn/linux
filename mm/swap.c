@@ -623,7 +623,7 @@ static void lru_deactivate_fn(struct page *page, struct lruvec *lruvec)
 {
 	int nr_pages = thp_nr_pages(page);
 
-	if (PageUnevictable(page) || !(PageActive(page) || lru_gen_enabled())
+	if (PageUnevictable(page) || !(PageActive(page) || lru_gen_enabled()))
 		return;
 
 	del_page_from_lru_list(page, lruvec);
