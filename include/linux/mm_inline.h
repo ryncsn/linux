@@ -10,17 +10,87 @@
 #include <trace/hooks/mm.h>
 #endif
 
+/* Simple one-to-one mappings for folio compat */
 #define folio page
-#define folio_test_lru PageLRU
-#define folio_test_active PageActive
-#define folio_test_unevictable PageUnevictable
-#define folio_test_swapbacked PageSwapBacked
-#define __folio_clear_lru __ClearPageLRU
-#define __folio_clear_active __ClearPageActive
-#define __folio_clear_unevictable __ClearPageUnevictable
 #define folio_zonenum page_zonenum
 #define folio_nr_pages thp_nr_pages
+#define lru_to_folio lru_to_page
+#define folio_evictable page_evictable
+#define folio_nid page_to_nid
+#define folio_pgdat page_pgdat
+#define folio_memcg page_memcg
+#define folio_memcg_check page_memcg_check
+#define folio_matches_lruvec page_matches_lruvec
+#define folio_lruvec_lock_irq lock_page_lruvec_irq
+#define folio_lruvec_lock_irqsave lock_page_lruvec_irqsave
+#define folio_lruvec_relock_irq relock_page_lruvec_irq
+#define folio_lruvec_relock_irqsave relock_page_lruvec_irqrestore
+#define lru_gen_folio lru_gen_struct
 #define VM_BUG_ON_FOLIO VM_BUG_ON_PAGE
+#define VM_WARN_ON_ONCE_FOLIO VM_WARN_ON_ONCE_PAGE
+
+/*
+ * Meta macros to generate folio compat wrappers. Using the C preprocessor
+ * we can batch create the PageFoo / ClearPageFoo / SetPageFoo mappings.
+ */
+#define FOLIO_COMPAT_TEST(name, page_op) \
+	static inline bool folio_test_##name(struct folio *folio) \
+	{ return page_op((struct page *)folio); }
+#define FOLIO_COMPAT_SET(name, page_op) \
+	static inline void folio_set_##name(struct folio *folio) \
+	{ page_op((struct page *)folio); }
+#define FOLIO_COMPAT_CLEAR(name, page_op) \
+	static inline void folio_clear_##name(struct folio *folio) \
+	{ page_op((struct page *)folio); }
+#define FOLIO_COMPAT_TEST_CLEAR(name, page_op) \
+	static inline bool folio_test_clear_##name(struct folio *folio) \
+	{ return page_op((struct page *)folio); }
+
+FOLIO_COMPAT_TEST(lru, PageLRU)
+FOLIO_COMPAT_TEST(active, PageActive)
+FOLIO_COMPAT_TEST(unevictable, PageUnevictable)
+FOLIO_COMPAT_TEST(swapbacked, PageSwapBacked)
+FOLIO_COMPAT_TEST(referenced, PageReferenced)
+FOLIO_COMPAT_TEST(workingset, PageWorkingset)
+FOLIO_COMPAT_TEST(swapcache, PageSwapCache)
+FOLIO_COMPAT_TEST(reclaim, PageReclaim)
+FOLIO_COMPAT_TEST(dirty, PageDirty)
+FOLIO_COMPAT_TEST(writeback, PageWriteback)
+FOLIO_COMPAT_TEST(mlocked, PageMlocked)
+FOLIO_COMPAT_TEST(anon, PageAnon)
+
+FOLIO_COMPAT_SET(active, SetPageActive)
+FOLIO_COMPAT_SET(referenced, SetPageReferenced)
+FOLIO_COMPAT_SET(workingset, SetPageWorkingset)
+FOLIO_COMPAT_SET(unevictable, SetPageUnevictable)
+FOLIO_COMPAT_SET(lru, SetPageLRU)
+
+FOLIO_COMPAT_CLEAR(active, ClearPageActive)
+FOLIO_COMPAT_CLEAR(referenced, ClearPageReferenced)
+FOLIO_COMPAT_CLEAR(workingset, ClearPageWorkingset)
+FOLIO_COMPAT_CLEAR(swapbacked, ClearPageSwapBacked)
+FOLIO_COMPAT_CLEAR(reclaim, ClearPageReclaim)
+FOLIO_COMPAT_CLEAR(lru, ClearPageLRU)
+
+FOLIO_COMPAT_TEST_CLEAR(referenced, TestClearPageReferenced)
+FOLIO_COMPAT_TEST_CLEAR(lru, TestClearPageLRU)
+
+#undef FOLIO_COMPAT_TEST
+#undef FOLIO_COMPAT_SET
+#undef FOLIO_COMPAT_CLEAR
+#undef FOLIO_COMPAT_TEST_CLEAR
+
+#define page_folio(page) page
+#define folio_page(folio) folio
+static inline struct lruvec *folio_lruvec(struct folio *folio)
+{
+	return mem_cgroup_lruvec(folio_memcg(folio), folio_pgdat(folio));
+}
+
+/* Internal helpers still used by __folio_clear_lru_flags() */
+#define __folio_clear_lru(folio)	__ClearPageLRU((struct page *)(folio))
+#define __folio_clear_active(folio)	__ClearPageActive((struct page *)(folio))
+#define __folio_clear_unevictable(folio) __ClearPageUnevictable((struct page *)(folio))
 
 /**
  * folio_is_file_lru - Should the folio be on a file LRU or anon LRU?
@@ -112,6 +182,11 @@ static __always_inline enum lru_list folio_lru_list(struct folio *folio)
 
 #ifdef CONFIG_LRU_GEN
 
+static inline bool lru_gen_switching(void)
+{
+	return false;
+}
+
 #ifdef CONFIG_LRU_GEN_ENABLED
 static inline bool lru_gen_enabled(void)
 {
@@ -143,36 +218,36 @@ static inline int lru_hist_from_seq(unsigned long seq)
 	return seq % NR_HIST_GENS;
 }
 
-static inline int lru_tier_from_refs(int refs)
+static inline int lru_tier_from_refs(int refs, bool workingset)
 {
 	VM_WARN_ON_ONCE(refs > BIT(LRU_REFS_WIDTH));
 
-	/* see the comment in page_lru_refs() */
-	return order_base_2(refs + 1);
+	/* see the comment on MAX_NR_TIERS */
+	return workingset ? MAX_NR_TIERS - 1 : order_base_2(refs);
 }
 
-static inline int page_lru_refs(struct page *page)
+static inline int folio_lru_refs(const struct folio *folio)
 {
-	unsigned long flags = READ_ONCE(page->flags);
-	bool workingset = flags & BIT(PG_workingset);
+	unsigned long flags = READ_ONCE(folio->flags);
 
+	if (!(flags & BIT(PG_referenced)))
+		return 0;
 	/*
-	 * Return the number of accesses beyond PG_referenced, i.e., N-1 if the
-	 * total number of accesses is N>1, since N=0,1 both map to the first
-	 * tier. lru_tier_from_refs() will account for this off-by-one. Also see
-	 * the comment on MAX_NR_TIERS.
+	 * Return the total number of accesses including PG_referenced. Also see
+	 * the comment on LRU_REFS_FLAGS.
 	 */
-	return ((flags & LRU_REFS_MASK) >> LRU_REFS_PGOFF) + workingset;
+	return ((flags & LRU_REFS_MASK) >> LRU_REFS_PGOFF) + 1;
 }
+#define folio_lru_refs folio_lru_refs
 
-static inline int page_lru_gen(struct page *page)
+static inline int folio_lru_gen(const struct folio *folio)
 {
-	unsigned long flags = READ_ONCE(page->flags);
+	unsigned long flags = READ_ONCE(folio->flags);
 
 	return ((flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
 }
 
-static inline bool lru_gen_is_active(struct lruvec *lruvec, int gen)
+static inline bool lru_gen_is_active(const struct lruvec *lruvec, int gen)
 {
 	unsigned long max_seq = lruvec->lrugen.max_seq;
 
@@ -189,7 +264,7 @@ static inline void lru_gen_update_size(struct lruvec *lruvec, struct folio *foli
 	int zone = folio_zonenum(folio);
 	int delta = folio_nr_pages(folio);
 	enum lru_list lru = type * LRU_INACTIVE_FILE;
-	struct lru_gen_struct *lrugen = &lruvec->lrugen;
+	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 
 	VM_WARN_ON_ONCE(old_gen != -1 && old_gen >= MAX_NR_GENS);
 	VM_WARN_ON_ONCE(new_gen != -1 && new_gen >= MAX_NR_GENS);
@@ -224,65 +299,84 @@ static inline void lru_gen_update_size(struct lruvec *lruvec, struct folio *foli
 		__update_lru_size(lruvec, lru + LRU_ACTIVE, zone, delta);
 	}
 
-	/* demotion requires isolation, e.g., lru_deactivate_fn() */
+	/* demotion requires isolation, e.g., llru_gen_folio_seqru_deactivate_fn() */
 	VM_WARN_ON_ONCE(lru_gen_is_active(lruvec, old_gen) && !lru_gen_is_active(lruvec, new_gen));
 }
 
-static inline bool lru_gen_add_page(struct lruvec *lruvec, struct page *page, bool reclaiming)
+static inline unsigned long lru_gen_folio_seq(const struct lruvec *lruvec,
+					      struct folio *folio,
+					      bool reclaiming)
+{
+	int gen;
+	int type = folio_is_file_lru(folio);
+	const struct lru_gen_folio *lrugen = &lruvec->lrugen;
+
+	/*
+	 * +-----------------------------------+-----------------------------------+
+	 * | Accessed through page tables and  | Accessed through file descriptors |
+	 * | promoted by folio_update_gen()    | and protected by folio_inc_gen()  |
+	 * +-----------------------------------+-----------------------------------+
+	 * | PG_active (set while isolated)    |                                   |
+	 * +-----------------+-----------------+-----------------+-----------------+
+	 * |  PG_workingset  |  PG_referenced  |  PG_workingset  |  LRU_REFS_FLAGS |
+	 * +-----------------------------------+-----------------------------------+
+	 * |<---------- MIN_NR_GENS ---------->|                                   |
+	 * |<---------------------------- MAX_NR_GENS ---------------------------->|
+	 */
+	if (folio_test_active(folio))
+		gen = MIN_NR_GENS - folio_test_workingset(folio);
+	else if (reclaiming)
+		gen = MAX_NR_GENS;
+	else if ((!folio_is_file_lru(folio) && !folio_test_swapcache(folio)) ||
+		 (folio_test_reclaim(folio) &&
+		  (folio_test_dirty(folio) || folio_test_writeback(folio))))
+		gen = MIN_NR_GENS;
+	else
+		gen = MAX_NR_GENS - folio_test_workingset(folio);
+
+	return max(READ_ONCE(lrugen->max_seq) - gen + 1, READ_ONCE(lrugen->min_seq[type]));
+}
+
+static inline bool lru_gen_add_page(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
 {
 	unsigned long seq;
 	unsigned long flags;
-	int gen = page_lru_gen(page);
-	int type = page_is_file_lru(page);
-	int zone = page_zonenum(page);
-	struct lru_gen_struct *lrugen = &lruvec->lrugen;
+	int gen = folio_lru_gen(folio);
+	int type = folio_is_file_lru(folio);
+	int zone = folio_zonenum(folio);
+	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 	bool skip = false;
 
 	trace_android_vh_lru_gen_add_page_skip(lruvec, page, &skip);
 	if (skip)
 		return true;
 
-	VM_WARN_ON_ONCE_PAGE(gen != -1, page);
+	VM_WARN_ON_ONCE_FOLIO(gen != -1, folio);
 
-	if (PageUnevictable(page) || !lrugen->enabled)
+	if (folio_test_unevictable(folio) || !lrugen->enabled)
 		return false;
-	/*
-	 * There are three common cases for this page:
-	 * 1. If it's hot, e.g., freshly faulted in or previously hot and
-	 *    migrated, add it to the youngest generation.
-	 * 2. If it's cold but can't be evicted immediately, i.e., an anon page
-	 *    not in swapcache or a dirty page pending writeback, add it to the
-	 *    second oldest generation.
-	 * 3. Everything else (clean, cold) is added to the oldest generation.
-	 */
-	if (PageActive(page))
-		seq = lrugen->max_seq;
-	else if ((type == LRU_GEN_ANON && !PageSwapCache(page)) ||
-		 (PageReclaim(page) &&
-		  (PageDirty(page) || PageWriteback(page))))
-		seq = lrugen->min_seq[type] + 1;
-	else
-		seq = lrugen->min_seq[type];
 
+	seq = lru_gen_folio_seq(lruvec, folio, reclaiming);
 	gen = lru_gen_from_seq(seq);
 	flags = (gen + 1UL) << LRU_GEN_PGOFF;
 	/* see the comment on MIN_NR_GENS about PG_active */
-	set_mask_bits(&page->flags, LRU_GEN_MASK | BIT(PG_active), flags);
+	set_mask_bits(&folio->flags, LRU_GEN_MASK | BIT(PG_active), flags);
 
-	lru_gen_update_size(lruvec, page, -1, gen);
-	/* for rotate_reclaimable_page() */
+	lru_gen_update_size(lruvec, folio, -1, gen);
+	/* for rotate_reclaimable_page() / folio_rotate_reclaimable() */
 	if (reclaiming)
-		list_add_tail(&page->lru, &lrugen->lists[gen][type][zone]);
+		list_add_tail(&folio->lru, &lrugen->lists[gen][type][zone]);
 	else
-		list_add(&page->lru, &lrugen->lists[gen][type][zone]);
+		list_add(&folio->lru, &lrugen->lists[gen][type][zone]);
 
 	return true;
 }
+#define lru_gen_add_folio lru_gen_add_page
 
-static inline bool lru_gen_del_page(struct lruvec *lruvec, struct page *page, bool reclaiming)
+static inline bool lru_gen_del_page(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
 {
 	unsigned long flags;
-	int gen = page_lru_gen(page);
+	int gen = folio_lru_gen(folio);
 	bool skip = false;
 
 	trace_android_vh_lru_gen_del_page_skip(lruvec, page, &skip);
@@ -292,23 +386,36 @@ static inline bool lru_gen_del_page(struct lruvec *lruvec, struct page *page, bo
 	if (gen < 0)
 		return false;
 
-	VM_WARN_ON_ONCE_PAGE(PageActive(page), page);
-	VM_WARN_ON_ONCE_PAGE(PageUnevictable(page), page);
+	VM_WARN_ON_ONCE_FOLIO(folio_test_active(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(folio_test_unevictable(folio), folio);
 
-	/* for migrate_page_states() */
+	/* for folio_migrate_flags() */
 	flags = !reclaiming && lru_gen_is_active(lruvec, gen) ? BIT(PG_active) : 0;
-	flags = set_mask_bits(&page->flags, LRU_GEN_MASK, flags);
+	flags = set_mask_bits(&folio->flags, LRU_GEN_MASK, flags);
 	gen = ((flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
 
-	lru_gen_update_size(lruvec, page, gen, -1);
-	list_del(&page->lru);
+	lru_gen_update_size(lruvec, folio, gen, -1);
+	list_del(&folio->lru);
 
 	return true;
+}
+#define lru_gen_del_folio lru_gen_del_page
+
+static inline void folio_migrate_refs(struct folio *new, const struct folio *old)
+{
+	unsigned long refs = READ_ONCE(old->flags) & LRU_REFS_MASK;
+
+	set_mask_bits(&new->flags, LRU_REFS_MASK, refs);
 }
 
 #else /* !CONFIG_LRU_GEN */
 
 static inline bool lru_gen_enabled(void)
+{
+	return false;
+}
+
+static inline bool lru_gen_switching(void)
 {
 	return false;
 }
@@ -322,10 +429,16 @@ static inline bool lru_gen_add_page(struct lruvec *lruvec, struct page *page, bo
 {
 	return false;
 }
+#define lru_gen_add_folio lru_gen_add_page
 
 static inline bool lru_gen_del_page(struct lruvec *lruvec, struct page *page, bool reclaiming)
 {
 	return false;
+}
+#define lru_gen_del_folio lru_gen_del_page
+
+static inline void page_migrate_refs(struct page *new, const struct page *old)
+{
 }
 
 #endif /* CONFIG_LRU_GEN */

@@ -390,35 +390,31 @@ static void __lru_cache_activate_page(struct page *page)
 }
 
 #ifdef CONFIG_LRU_GEN
-static void page_inc_refs(struct page *page)
+static void lru_gen_inc_refs(struct folio *folio)
 {
-	unsigned long new_flags, old_flags = READ_ONCE(page->flags);
+	unsigned long new_flags, old_flags = READ_ONCE(folio->flags);
 
-	if (PageUnevictable(page))
+	if (folio_test_unevictable(folio))
 		return;
 
-	if (!PageReferenced(page)) {
-		SetPageReferenced(page);
-		return;
-	}
-
-	if (!PageWorkingset(page)) {
-		SetPageWorkingset(page);
+	/* see the comment on LRU_REFS_FLAGS */
+	if (!folio_test_referenced(folio)) {
+		set_mask_bits(&folio->flags, LRU_REFS_MASK, BIT(PG_referenced));
 		return;
 	}
 
-	/* see the comment on MAX_NR_TIERS */
 	do {
-		new_flags = old_flags & LRU_REFS_MASK;
-		if (new_flags == LRU_REFS_MASK)
-			break;
+		if ((old_flags & LRU_REFS_MASK) == LRU_REFS_MASK) {
+			if (!folio_test_workingset(folio))
+				folio_set_workingset(folio);
+			return;
+		}
 
-		new_flags += BIT(LRU_REFS_PGOFF);
-		new_flags |= old_flags & ~LRU_REFS_MASK;
-	} while (!try_cmpxchg(&page->flags, &old_flags, new_flags));
+		new_flags = old_flags + BIT(LRU_REFS_PGOFF);
+	} while (!try_cmpxchg(&folio->flags, &old_flags, new_flags));
 }
 #else
-static void page_inc_refs(struct page *page)
+static void lru_gen_inc_refs(struct folio *folio)
 {
 }
 #endif /* CONFIG_LRU_GEN */
@@ -438,7 +434,7 @@ void mark_page_accessed(struct page *page)
 	page = compound_head(page);
 
 	if (lru_gen_enabled()) {
-		page_inc_refs(page);
+		lru_gen_inc_refs((struct folio *)page);
 		return;
 	}
 
@@ -469,6 +465,22 @@ void mark_page_accessed(struct page *page)
 		clear_page_idle(page);
 }
 EXPORT_SYMBOL(mark_page_accessed);
+
+static bool lru_gen_clear_refs(struct folio *folio)
+{
+	struct lru_gen_struct *lrugen;
+	int gen = folio_lru_gen(folio);
+	int type = folio_is_file_lru(folio);
+
+	if (gen < 0)
+		return true;
+
+	set_mask_bits(&folio->flags, LRU_REFS_FLAGS | BIT(PG_workingset), 0);
+
+	lrugen = &folio_lruvec(folio)->lrugen;
+	/* whether can do without shuffling under the LRU lock */
+	return gen == lru_gen_from_seq(READ_ONCE(lrugen->min_seq[type]));
+}
 
 /**
  * lru_cache_add - add a page to a page list
@@ -619,7 +631,10 @@ static void lru_lazyfree_fn(struct page *page, struct lruvec *lruvec)
 
 		del_page_from_lru_list(page, lruvec);
 		ClearPageActive(page);
-		ClearPageReferenced(page);
+		if (lru_gen_enabled())
+			lru_gen_clear_refs(page);
+		else
+			ClearPageReferenced(page);
 		/*
 		 * Lazyfree pages are clean anonymous pages.  They have
 		 * PG_swapbacked flag cleared, to distinguish them from normal
@@ -692,6 +707,9 @@ void deactivate_file_page(struct page *page)
 	if (likely(get_page_unless_zero(page))) {
 		struct pagevec *pvec;
 
+		if (lru_gen_enabled() && lru_gen_clear_refs(page))
+			return;
+
 		local_lock(&lru_pvecs.lock);
 		pvec = this_cpu_ptr(&lru_pvecs.lru_deactivate_file);
 
@@ -714,6 +732,9 @@ void deactivate_page(struct page *page)
 	if (PageLRU(page) && !PageUnevictable(page) &&
 	    (PageActive(page) || lru_gen_enabled())) {
 		struct pagevec *pvec;
+
+		if (lru_gen_enabled() && lru_gen_clear_refs(page))
+			return;
 
 		local_lock(&lru_pvecs.lock);
 		pvec = this_cpu_ptr(&lru_pvecs.lru_deactivate);

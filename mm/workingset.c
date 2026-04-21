@@ -227,8 +227,9 @@ static void *lru_gen_eviction(struct page *page)
 	struct lru_gen_struct *lrugen;
 	int type = page_is_file_lru(page);
 	int delta = thp_nr_pages(page);
-	int refs = page_lru_refs(page);
-	int tier = lru_tier_from_refs(refs);
+	int refs = folio_lru_refs(page);
+	bool workingset = PageWorkingset(page);
+	int tier = lru_tier_from_refs(refs, workingset);
 	struct mem_cgroup *memcg = page_memcg(page);
 	struct pglist_data *pgdat = page_pgdat(page);
 
@@ -242,7 +243,7 @@ static void *lru_gen_eviction(struct page *page)
 	hist = lru_hist_from_seq(min_seq);
 	atomic_long_add(delta, &lrugen->evicted[hist][type][tier]);
 
-	return pack_shadow(mem_cgroup_id(memcg), pgdat, token, refs);
+	return pack_shadow(mem_cgroup_id(memcg), pgdat, token, workingset);
 }
 
 static void lru_gen_refault(struct page *page, void *shadow)
@@ -280,9 +281,9 @@ static void lru_gen_refault(struct page *page, void *shadow)
 		goto unlock;
 
 	hist = lru_hist_from_seq(min_seq);
-	/* see the comment in page_lru_refs() */
-	refs = (token & (BIT(LRU_REFS_WIDTH) - 1)) + workingset;
-	tier = lru_tier_from_refs(refs);
+	/* see the comment in folio_lru_refs() */
+	refs = (token & (BIT(LRU_REFS_WIDTH) - 1)) + 1;
+	tier = lru_tier_from_refs(refs, workingset);
 
 	atomic_long_add(delta, &lrugen->refaulted[hist][type][tier]);
 	mod_lruvec_state(lruvec, WORKINGSET_ACTIVATE_BASE + type, delta);
@@ -297,7 +298,9 @@ static void lru_gen_refault(struct page *page, void *shadow)
 	if (lru_gen_in_fault() || refs == BIT(LRU_REFS_WIDTH)) {
 		SetPageWorkingset(page);
 		mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
-	}
+	} else
+		set_mask_bits(&page->flags, LRU_REFS_MASK,
+			      (refs - 1UL) << LRU_REFS_PGOFF);
 unlock:
 	rcu_read_unlock();
 }
