@@ -10,24 +10,38 @@
 #include <trace/hooks/mm.h>
 #endif
 
+#define folio page
+#define folio_test_lru PageLRU
+#define folio_test_active PageActive
+#define folio_test_unevictable PageUnevictable
+#define folio_test_swapbacked PageSwapBacked
+#define __folio_clear_lru __ClearPageLRU
+#define __folio_clear_active __ClearPageActive
+#define __folio_clear_unevictable __ClearPageUnevictable
+#define folio_zonenum page_zonenum
+#define folio_nr_pages thp_nr_pages
+#define VM_BUG_ON_FOLIO VM_BUG_ON_PAGE
+
 /**
- * page_is_file_lru - should the page be on a file LRU or anon LRU?
- * @page: the page to test
- *
- * Returns 1 if @page is a regular filesystem backed page cache page or a lazily
- * freed anonymous page (e.g. via MADV_FREE).  Returns 0 if @page is a normal
- * anonymous page, a tmpfs page or otherwise ram or swap backed page.  Used by
- * functions that manipulate the LRU lists, to sort a page onto the right LRU
- * list.
+ * folio_is_file_lru - Should the folio be on a file LRU or anon LRU?
+ * @folio: The folio to test.
  *
  * We would like to get this info without a page flag, but the state
- * needs to survive until the page is last deleted from the LRU, which
+ * needs to survive until the folio is last deleted from the LRU, which
  * could be as far down as __page_cache_release.
+ *
+ * Return: An integer (not a boolean!) used to sort a folio onto the
+ * right LRU list and to account folios correctly.
+ * 1 if @folio is a regular filesystem backed page cache folio
+ * or a lazily freed anonymous folio (e.g. via MADV_FREE).
+ * 0 if @folio is a normal anonymous folio, a tmpfs folio or otherwise
+ * ram or swap backed folio.
  */
-static inline int page_is_file_lru(struct page *page)
+static inline int folio_is_file_lru(struct folio *folio)
 {
-	return !PageSwapBacked(page);
+	return !folio_test_swapbacked(folio);
 }
+#define page_is_file_lru folio_is_file_lru
 
 static __always_inline void __update_lru_size(struct lruvec *lruvec,
 				enum lru_list lru, enum zone_type zid,
@@ -54,45 +68,47 @@ static __always_inline void update_lru_size(struct lruvec *lruvec,
 }
 
 /**
- * __clear_page_lru_flags - clear page lru flags before releasing a page
- * @page: the page that was on lru and now has a zero reference
+ * __folio_clear_lru_flags - Clear page lru flags before releasing a page.
+ * @folio: The folio that was on lru and now has a zero reference.
  */
-static __always_inline void __clear_page_lru_flags(struct page *page)
+static __always_inline void __folio_clear_lru_flags(struct folio *folio)
 {
-	VM_BUG_ON_PAGE(!PageLRU(page), page);
+	VM_BUG_ON_FOLIO(!folio_test_lru(folio), folio);
 
-	__ClearPageLRU(page);
+	__folio_clear_lru(folio);
 
 	/* this shouldn't happen, so leave the flags to bad_page() */
-	if (PageActive(page) && PageUnevictable(page))
+	if (folio_test_active(folio) && folio_test_unevictable(folio))
 		return;
 
-	__ClearPageActive(page);
-	__ClearPageUnevictable(page);
+	__folio_clear_active(folio);
+	__folio_clear_unevictable(folio);
 }
+#define __clear_page_lru_flags __folio_clear_lru_flags
 
 /**
- * page_lru - which LRU list should a page be on?
- * @page: the page to test
+ * folio_lru_list - Which LRU list should a folio be on?
+ * @folio: The folio to test.
  *
- * Returns the LRU list a page should be on, as an index
+ * Return: The LRU list a folio should be on, as an index
  * into the array of LRU lists.
  */
-static __always_inline enum lru_list page_lru(struct page *page)
+static __always_inline enum lru_list folio_lru_list(struct folio *folio)
 {
 	enum lru_list lru;
 
-	VM_BUG_ON_PAGE(PageActive(page) && PageUnevictable(page), page);
+	VM_BUG_ON_FOLIO(folio_test_active(folio) && folio_test_unevictable(folio), folio);
 
-	if (PageUnevictable(page))
+	if (folio_test_unevictable(folio))
 		return LRU_UNEVICTABLE;
 
-	lru = page_is_file_lru(page) ? LRU_INACTIVE_FILE : LRU_INACTIVE_ANON;
-	if (PageActive(page))
+	lru = folio_is_file_lru(folio) ? LRU_INACTIVE_FILE : LRU_INACTIVE_ANON;
+	if (folio_test_active(folio))
 		lru += LRU_ACTIVE;
 
 	return lru;
 }
+#define page_lru folio_lru_list
 
 #ifdef CONFIG_LRU_GEN
 
@@ -166,12 +182,12 @@ static inline bool lru_gen_is_active(struct lruvec *lruvec, int gen)
 	return gen == lru_gen_from_seq(max_seq) || gen == lru_gen_from_seq(max_seq - 1);
 }
 
-static inline void lru_gen_update_size(struct lruvec *lruvec, struct page *page,
+static inline void lru_gen_update_size(struct lruvec *lruvec, struct folio *folio,
 				       int old_gen, int new_gen)
 {
-	int type = page_is_file_lru(page);
-	int zone = page_zonenum(page);
-	int delta = thp_nr_pages(page);
+	int type = folio_is_file_lru(folio);
+	int zone = folio_zonenum(folio);
+	int delta = folio_nr_pages(folio);
 	enum lru_list lru = type * LRU_INACTIVE_FILE;
 	struct lru_gen_struct *lrugen = &lruvec->lrugen;
 
