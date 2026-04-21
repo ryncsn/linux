@@ -199,55 +199,25 @@ struct notifier_block module_trace_bprintk_format_nb = {
 
 int __trace_bprintk(unsigned long ip, const char *fmt, ...)
 {
-	int ret;
-	va_list ap;
-
-	if (unlikely(!fmt))
-		return 0;
-
-	if (!trace_printk_enabled)
-		return 0;
-
-	va_start(ap, fmt);
-	ret = trace_vbprintk(ip, fmt, ap);
-	va_end(ap);
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(__trace_bprintk);
 
 int __ftrace_vbprintk(unsigned long ip, const char *fmt, va_list ap)
 {
-	if (unlikely(!fmt))
-		return 0;
-
-	if (!trace_printk_enabled)
-		return 0;
-
-	return trace_vbprintk(ip, fmt, ap);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(__ftrace_vbprintk);
 
 int __trace_printk(unsigned long ip, const char *fmt, ...)
 {
-	int ret;
-	va_list ap;
-
-	if (!trace_printk_enabled)
-		return 0;
-
-	va_start(ap, fmt);
-	ret = trace_vprintk(ip, fmt, ap);
-	va_end(ap);
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(__trace_printk);
 
 int __ftrace_vprintk(unsigned long ip, const char *fmt, va_list ap)
 {
-	if (!trace_printk_enabled)
-		return 0;
-
-	return trace_vprintk(ip, fmt, ap);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(__ftrace_vprintk);
 
