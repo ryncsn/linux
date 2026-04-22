@@ -238,7 +238,6 @@ static inline int folio_lru_refs(const struct folio *folio)
 	 */
 	return ((flags & LRU_REFS_MASK) >> LRU_REFS_PGOFF) + 1;
 }
-#define folio_lru_refs folio_lru_refs
 
 static inline int folio_lru_gen(const struct folio *folio)
 {
@@ -337,7 +336,7 @@ static inline unsigned long lru_gen_folio_seq(const struct lruvec *lruvec,
 	return max(READ_ONCE(lrugen->max_seq) - gen + 1, READ_ONCE(lrugen->min_seq[type]));
 }
 
-static inline bool lru_gen_add_page(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
+static inline bool lru_gen_add_folio(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
 {
 	unsigned long seq;
 	unsigned long flags;
@@ -345,11 +344,6 @@ static inline bool lru_gen_add_page(struct lruvec *lruvec, struct folio *folio, 
 	int type = folio_is_file_lru(folio);
 	int zone = folio_zonenum(folio);
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
-	bool skip = false;
-
-	trace_android_vh_lru_gen_add_page_skip(lruvec, page, &skip);
-	if (skip)
-		return true;
 
 	VM_WARN_ON_ONCE_FOLIO(gen != -1, folio);
 
@@ -371,17 +365,11 @@ static inline bool lru_gen_add_page(struct lruvec *lruvec, struct folio *folio, 
 
 	return true;
 }
-#define lru_gen_add_folio lru_gen_add_page
 
-static inline bool lru_gen_del_page(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
+static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
 {
 	unsigned long flags;
 	int gen = folio_lru_gen(folio);
-	bool skip = false;
-
-	trace_android_vh_lru_gen_del_page_skip(lruvec, page, &skip);
-	if (skip)
-		return true;
 
 	if (gen < 0)
 		return false;
@@ -399,7 +387,6 @@ static inline bool lru_gen_del_page(struct lruvec *lruvec, struct folio *folio, 
 
 	return true;
 }
-#define lru_gen_del_folio lru_gen_del_page
 
 static inline void folio_migrate_refs(struct folio *new, const struct folio *old)
 {
@@ -407,7 +394,6 @@ static inline void folio_migrate_refs(struct folio *new, const struct folio *old
 
 	set_mask_bits(&new->flags, LRU_REFS_MASK, refs);
 }
-
 #else /* !CONFIG_LRU_GEN */
 
 static inline bool lru_gen_enabled(void)
@@ -425,22 +411,20 @@ static inline bool lru_gen_in_fault(void)
 	return false;
 }
 
-static inline bool lru_gen_add_page(struct lruvec *lruvec, struct page *page, bool reclaiming)
+static inline bool lru_gen_add_folio(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
 {
 	return false;
 }
-#define lru_gen_add_folio lru_gen_add_page
 
-static inline bool lru_gen_del_page(struct lruvec *lruvec, struct page *page, bool reclaiming)
+static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
 {
 	return false;
 }
-#define lru_gen_del_folio lru_gen_del_page
 
-static inline void page_migrate_refs(struct page *new, const struct page *old)
+static inline void folio_migrate_refs(struct folio *new, const struct folio *old)
 {
-}
 
+}
 #endif /* CONFIG_LRU_GEN */
 
 static __always_inline void add_page_to_lru_list(struct page *page,
@@ -448,7 +432,7 @@ static __always_inline void add_page_to_lru_list(struct page *page,
 {
 	enum lru_list lru = page_lru(page);
 
-	if (lru_gen_add_page(lruvec, page, false))
+	if (lru_gen_add_folio(lruvec, page, false))
 		return;
 
 	trace_android_vh_add_page_to_lrulist(page, false, lru);
@@ -461,7 +445,7 @@ static __always_inline void add_page_to_lru_list_tail(struct page *page,
 {
 	enum lru_list lru = page_lru(page);
 
-	if (lru_gen_add_page(lruvec, page, true))
+	if (lru_gen_add_folio(lruvec, page, true))
 		return;
 
 	trace_android_vh_add_page_to_lrulist(page, false, page_lru(page));
@@ -472,7 +456,7 @@ static __always_inline void add_page_to_lru_list_tail(struct page *page,
 static __always_inline void del_page_from_lru_list(struct page *page,
 				struct lruvec *lruvec)
 {
-	if (lru_gen_del_page(lruvec, page, false))
+	if (lru_gen_del_folio(lruvec, page, false))
 		return;
 
 	trace_android_vh_del_page_from_lrulist(page, false, page_lru(page));

@@ -225,12 +225,6 @@ DECLARE_HOOK(android_vh_si_meminfo_adjust,
 DECLARE_HOOK(android_vh_filemap_pages,
 	TP_PROTO(struct page *page),
 	TP_ARGS(page));
-DECLARE_HOOK(android_vh_lru_gen_add_page_skip,
-	TP_PROTO(struct lruvec *lruvec, struct page *page, bool *skip),
-	TP_ARGS(lruvec, page, skip));
-DECLARE_HOOK(android_vh_lru_gen_del_page_skip,
-	TP_PROTO(struct lruvec *lruvec, struct page *page, bool *skip),
-	TP_ARGS(lruvec, page, skip));
 
 DECLARE_RESTRICTED_HOOK(android_rvh_ctl_dirty_rate,
 	TP_PROTO(void *unused),

@@ -3596,7 +3596,7 @@ static int folio_update_gen(struct folio *folio, int gen)
 	}
 
 	do {
-		/* lru_gen_del_page() has isolated this page? */
+		/* lru_gen_del_folio() has isolated this page? */
 		if (!(old_flags & LRU_GEN_MASK))
 			return -1;
 
@@ -4731,7 +4731,7 @@ static bool sort_page(struct lruvec *lruvec, struct page *page, struct scan_cont
 
 	/* unevictable */
 	if (!page_evictable(page)) {
-		success = lru_gen_del_page(lruvec, page, true);
+		success = lru_gen_del_folio(lruvec, page, true);
 		VM_WARN_ON_ONCE_PAGE(!success, page);
 		SetPageUnevictable(page);
 		add_page_to_lru_list(page, lruvec);
@@ -4741,7 +4741,7 @@ static bool sort_page(struct lruvec *lruvec, struct page *page, struct scan_cont
 
 	/* dirty lazyfree */
 	if (type == LRU_GEN_FILE && PageAnon(page) && PageDirty(page)) {
-		success = lru_gen_del_page(lruvec, page, true);
+		success = lru_gen_del_folio(lruvec, page, true);
 		VM_WARN_ON_ONCE_PAGE(!success, page);
 		SetPageSwapBacked(page);
 		add_page_to_lru_list_tail(page, lruvec);
@@ -4818,7 +4818,7 @@ bool isolate_page(struct lruvec *lruvec, struct page *page, struct scan_control 
 	/* for shrink_page_list() */
 	ClearPageReclaim(page);
 
-	success = lru_gen_del_page(lruvec, page, true);
+	success = lru_gen_del_folio(lruvec, page, true);
 	VM_WARN_ON_ONCE_PAGE(!success, page);
 
 	return true;
@@ -5280,7 +5280,7 @@ static bool fill_evictable(struct lruvec *lruvec)
 			VM_WARN_ON_ONCE_PAGE(folio_lru_gen(page) != -1, page);
 
 			del_page_from_lru_list(page, lruvec);
-			success = lru_gen_add_page(lruvec, page, false);
+			success = lru_gen_add_folio(lruvec, page, false);
 			VM_WARN_ON_ONCE(!success);
 
 			if (!--remaining)
@@ -5308,7 +5308,7 @@ static bool drain_evictable(struct lruvec *lruvec)
 			VM_WARN_ON_ONCE_PAGE(page_is_file_lru(page) != type, page);
 			VM_WARN_ON_ONCE_PAGE(page_zonenum(page) != zone, page);
 
-			success = lru_gen_del_page(lruvec, page, false);
+			success = lru_gen_del_folio(lruvec, page, false);
 			VM_WARN_ON_ONCE(!success);
 			add_page_to_lru_list(page, lruvec);
 

@@ -564,8 +564,6 @@
   __traceiter_android_vh_binder_special_task
   __traceiter_android_vh_binder_free_buf
   __traceiter_android_vh_binder_buffer_release
-  __traceiter_android_vh_lru_gen_add_page_skip
-  __traceiter_android_vh_lru_gen_del_page_skip
   __traceiter_android_vh_evict_pages_bypass
   __traceiter_android_vh_keep_reclaimed_page
   __traceiter_android_vh_clear_reclaimed_page
@@ -727,8 +725,6 @@
   __tracepoint_android_vh_binder_special_task
   __tracepoint_android_vh_binder_free_buf
   __tracepoint_android_vh_binder_buffer_release
-  __tracepoint_android_vh_lru_gen_add_page_skip
-  __tracepoint_android_vh_lru_gen_del_page_skip
   __tracepoint_android_vh_evict_pages_bypass
   __tracepoint_android_vh_keep_reclaimed_page
   __tracepoint_android_vh_clear_reclaimed_page

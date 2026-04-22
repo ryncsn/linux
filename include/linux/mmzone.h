@@ -320,7 +320,7 @@ enum lruvec_flags {
  * PG_active is always cleared while a page is on one of lrugen->lists[] so that
  * the aging needs not to worry about it. And it's set again when a page
  * considered active is isolated for non-reclaiming purposes, e.g., migration.
- * See lru_gen_add_page() and lru_gen_del_page().
+ * See lru_gen_add_folio() and lru_gen_del_folio().
  *
  * MAX_NR_GENS is set to 4 so that the multi-gen LRU can support twice the
  * number of categories of the active/inactive LRU when keeping track of
