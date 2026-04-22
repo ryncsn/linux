@@ -4980,6 +4980,10 @@ static bool isolate_folio(struct lruvec *lruvec, struct folio *folio, struct sca
 		return false;
 	}
 
+	/* see the comment on LRU_REFS_FLAGS */
+	if (!folio_test_referenced(folio))
+		set_mask_bits(&folio->flags, LRU_REFS_MASK, 0);
+
 	/* for shrink_folio_list() */
 	folio_clear_reclaim(folio);
 
