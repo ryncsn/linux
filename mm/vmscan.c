@@ -5929,7 +5929,11 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 	bool proportional_reclaim;
 	struct blk_plug plug;
 
-	if (lru_gen_enabled() && cgroup_reclaim(sc)) {
+	/*
+	 * Can't skip the global kswap reclaim here, we don't have
+	 * memcg LRU and special global reclaim for MGLRU in downstream.
+	 */
+	if (lru_gen_enabled()) {
 		lru_gen_shrink_lruvec(lruvec, sc);
 		return;
 	}
