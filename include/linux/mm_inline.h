@@ -26,6 +26,12 @@
 #define folio_lruvec_relock_irq relock_page_lruvec_irq
 #define folio_lruvec_relock_irqsave relock_page_lruvec_irqrestore
 #define lru_gen_folio lru_gen_struct
+#define folio_mark_dirty set_page_dirty
+#define folio_activate activate_page
+#define folio_try_get get_page_unless_zero
+#define folio_put put_page
+#define folio_putback_lru putback_lru_page
+#define folio_mapped page_mapped
 #define VM_BUG_ON_FOLIO VM_BUG_ON_PAGE
 #define VM_WARN_ON_ONCE_FOLIO VM_WARN_ON_ONCE_PAGE
 
@@ -57,10 +63,12 @@ FOLIO_COMPAT_TEST(reclaim, PageReclaim)
 FOLIO_COMPAT_TEST(dirty, PageDirty)
 FOLIO_COMPAT_TEST(writeback, PageWriteback)
 FOLIO_COMPAT_TEST(mlocked, PageMlocked)
+FOLIO_COMPAT_TEST(locked, PageLocked)
 FOLIO_COMPAT_TEST(anon, PageAnon)
 
 FOLIO_COMPAT_SET(active, SetPageActive)
 FOLIO_COMPAT_SET(referenced, SetPageReferenced)
+FOLIO_COMPAT_SET(swapbacked, SetPageSwapBacked)
 FOLIO_COMPAT_SET(workingset, SetPageWorkingset)
 FOLIO_COMPAT_SET(unevictable, SetPageUnevictable)
 FOLIO_COMPAT_SET(lru, SetPageLRU)
