@@ -3003,13 +3003,8 @@ static bool can_age_anon_pages(struct pglist_data *pgdat,
 
 #ifdef CONFIG_LRU_GEN
 
-#ifdef CONFIG_LRU_GEN_ENABLED
 DEFINE_STATIC_KEY_ARRAY_TRUE(lru_gen_caps, NR_LRU_GEN_CAPS);
-#define get_cap(cap)	static_branch_likely(&lru_gen_caps[cap])
-#else
-DEFINE_STATIC_KEY_ARRAY_FALSE(lru_gen_caps, NR_LRU_GEN_CAPS);
-#define get_cap(cap)	static_branch_unlikely(&lru_gen_caps[cap])
-#endif
+#define get_cap(cap)	true
 
 static bool should_walk_mmu(void)
 {
@@ -5735,7 +5730,7 @@ static ssize_t store_enabled(struct kobject *kobj, struct kobj_attribute *attr,
 	unsigned int caps;
 
 	if (tolower(*buf) == 'n')
-		caps = 0;
+		return -EINVAL;
 	else if (tolower(*buf) == 'y')
 		caps = -1;
 	else if (kstrtouint(buf, 0, &caps))
