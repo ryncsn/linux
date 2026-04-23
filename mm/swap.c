@@ -413,10 +413,34 @@ static void lru_gen_inc_refs(struct folio *folio)
 		new_flags = old_flags + BIT(LRU_REFS_PGOFF);
 	} while (!try_cmpxchg(&folio->flags, &old_flags, new_flags));
 }
+
+static bool lru_gen_clear_refs(struct folio *folio)
+{
+	struct lru_gen_struct *lrugen;
+	int gen = folio_lru_gen(folio);
+	int type = folio_is_file_lru(folio);
+
+	if (gen < 0)
+		return true;
+
+	set_mask_bits(&folio->flags, LRU_REFS_FLAGS | BIT(PG_workingset), 0);
+
+	lrugen = &folio_lruvec(folio)->lrugen;
+	/* whether can do without shuffling under the LRU lock */
+	return gen == lru_gen_from_seq(READ_ONCE(lrugen->min_seq[type]));
+}
+
 #else
+
 static void lru_gen_inc_refs(struct folio *folio)
 {
 }
+
+static bool lru_gen_clear_refs(struct folio *folio)
+{
+	return false;
+}
+
 #endif /* CONFIG_LRU_GEN */
 
 /*
@@ -465,22 +489,6 @@ void mark_page_accessed(struct page *page)
 		clear_page_idle(page);
 }
 EXPORT_SYMBOL(mark_page_accessed);
-
-static bool lru_gen_clear_refs(struct folio *folio)
-{
-	struct lru_gen_struct *lrugen;
-	int gen = folio_lru_gen(folio);
-	int type = folio_is_file_lru(folio);
-
-	if (gen < 0)
-		return true;
-
-	set_mask_bits(&folio->flags, LRU_REFS_FLAGS | BIT(PG_workingset), 0);
-
-	lrugen = &folio_lruvec(folio)->lrugen;
-	/* whether can do without shuffling under the LRU lock */
-	return gen == lru_gen_from_seq(READ_ONCE(lrugen->min_seq[type]));
-}
 
 /**
  * lru_cache_add - add a page to a page list
@@ -569,7 +577,7 @@ void lru_cache_add_inactive_or_unevictable(struct page *page,
  */
 static void lru_deactivate_file_fn(struct page *page, struct lruvec *lruvec)
 {
-	bool active = PageActive(page);
+	bool active = PageActive(page) || lru_gen_enabled();
 	int nr_pages = thp_nr_pages(page);
 
 	if (PageUnevictable(page))
