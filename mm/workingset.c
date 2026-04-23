@@ -475,8 +475,10 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
 	tier = lru_tier_from_refs(refs);
 
 	/* see folio_add_lru() where folio_set_active() will be called */
-	if (lru_gen_in_fault())
+	if (distance < (total / MIN_NR_GENS)) {
+		// folio_set_active(folio);
 		mod_lruvec_state(lruvec, WORKINGSET_ACTIVATE_BASE + type, delta);
+	}
 
 	/* Restore reference count. */
 	if (refs) {

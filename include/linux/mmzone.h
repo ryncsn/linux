@@ -547,7 +547,7 @@ enum lruvec_flags {
 #define MAX_NR_TIERS		4U
 #define LRU_REFS_REFERENCED	0x1
 #define LRU_REFS_WORKINGSET	0x2
-#define LRU_REFS_PROTECTED	0x3
+#define LRU_REFS_PROTECTED	0x4
 
 #ifndef __GENERATING_BOUNDS_H
 
