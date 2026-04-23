@@ -1352,14 +1352,14 @@ void mem_cgroup_update_lru_size(struct lruvec *lruvec, enum lru_list lru,
 				int zid, int nr_pages)
 {
 	struct mem_cgroup_per_node *mz;
-	unsigned long *lru_size;
+	atomic_long_t *lru_zone_size;
 
 	if (mem_cgroup_disabled())
 		return;
 
 	mz = container_of(lruvec, struct mem_cgroup_per_node, lruvec);
-	lru_size = &mz->lru_zone_size[zid][lru];
-	*lru_size += nr_pages;
+	lru_zone_size = (void *)&mz->lru_zone_size[zid][lru];
+	atomic_long_add(nr_pages, lru_zone_size);
 }
 EXPORT_SYMBOL_GPL(mem_cgroup_update_lru_size);
 
