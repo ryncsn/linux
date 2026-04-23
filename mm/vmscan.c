@@ -4951,7 +4951,7 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
 	}
 
 	/* waiting for writeback */
-	if (writeback || (type == LRU_GEN_FILE && dirty) || folio_test_locked(folio)) {
+	if (writeback || (type == LRU_GEN_FILE && dirty)) {
 		gen = folio_inc_gen(lruvec, folio, true);
 		list_move(&folio->lru, &lrugen->lists[gen][type][zone]);
 		return true;
