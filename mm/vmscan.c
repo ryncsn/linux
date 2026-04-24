@@ -5235,8 +5235,8 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 {
 	DEFINE_MIN_SEQ(lruvec);
 
-	/* have to run aging, since eviction is not possible anymore */
-	if (evictable_min_seq(min_seq, swappiness) + MIN_NR_GENS > max_seq)
+	/* have to run aging, since one type eviction is not possible anymore */
+	if (max(min_seq[0], min_seq[1]) + MIN_NR_GENS > max_seq)
 		return true;
 
 	/* try to get away with not aging at the default priority */
