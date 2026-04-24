@@ -560,8 +560,6 @@ void migrate_page_states(struct page *newpage, struct page *page)
 
 	if (PageError(page))
 		SetPageError(newpage);
-	if (PageReferenced(page))
-		SetPageReferenced(newpage);
 	if (PageUptodate(page))
 		SetPageUptodate(newpage);
 	if (TestClearPageActive(page)) {
@@ -586,6 +584,7 @@ void migrate_page_states(struct page *newpage, struct page *page)
 	if (page_is_idle(page))
 		set_page_idle(newpage);
 
+	folio_migrate_refs(page_folio(newpage), page_folio(page));
 	/*
 	 * Copy NUMA information to the new page, to prevent over-eager
 	 * future migrations of this same page.
