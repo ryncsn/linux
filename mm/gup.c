@@ -2269,7 +2269,7 @@ static void __maybe_unused undo_dev_pagemap(int *nr, int nr_start,
 	while ((*nr) - nr_start) {
 		struct page *page = pages[--(*nr)];
 
-		ClearPageReferenced(page);
+		folio_set_lru_refs(page_folio(page), 0);
 		if (flags & FOLL_PIN)
 			unpin_user_page(page);
 		else
@@ -2365,7 +2365,7 @@ static int gup_pte_range(pmd_t pmd, pmd_t *pmdp, unsigned long addr,
 				goto pte_unmap;
 			}
 		}
-		SetPageReferenced(page);
+		folio_mark_referenced(page_folio(page));
 		pages[*nr] = page;
 		(*nr)++;
 
@@ -2416,7 +2416,7 @@ static int __gup_device_huge(unsigned long pfn, unsigned long addr,
 			ret = 0;
 			break;
 		}
-		SetPageReferenced(page);
+		folio_mark_referenced(page_folio(page));
 		pages[*nr] = page;
 		if (unlikely(!try_grab_page(page, flags))) {
 			undo_dev_pagemap(nr, nr_start, flags, pages);
@@ -2538,7 +2538,7 @@ static int gup_hugepte(pte_t *ptep, unsigned long sz, unsigned long addr,
 	}
 
 	*nr += refs;
-	SetPageReferenced(head);
+	folio_mark_referenced(page_folio(page));
 	return 1;
 }
 
@@ -2598,7 +2598,7 @@ static int gup_huge_pmd(pmd_t orig, pmd_t *pmdp, unsigned long addr,
 	}
 
 	*nr += refs;
-	SetPageReferenced(head);
+	folio_mark_referenced(page_folio(page));
 	return 1;
 }
 
@@ -2632,7 +2632,7 @@ static int gup_huge_pud(pud_t orig, pud_t *pudp, unsigned long addr,
 	}
 
 	*nr += refs;
-	SetPageReferenced(head);
+	folio_mark_referenced(page_folio(page));
 	return 1;
 }
 
@@ -2661,7 +2661,7 @@ static int gup_huge_pgd(pgd_t orig, pgd_t *pgdp, unsigned long addr,
 	}
 
 	*nr += refs;
-	SetPageReferenced(head);
+	folio_mark_referenced(page_folio(page));
 	return 1;
 }
 

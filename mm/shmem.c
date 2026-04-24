@@ -1941,7 +1941,7 @@ alloc_nohuge:
 		hindex = index;
 
 	if (sgp == SGP_WRITE)
-		__SetPageReferenced(page);
+		__folio_init_referenced(page_folio(page));
 
 	error = shmem_add_to_page_cache(page, mapping, hindex,
 					NULL, gfp & GFP_RECLAIM_MASK,

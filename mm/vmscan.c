@@ -1523,7 +1523,7 @@ retry:
 
 		/* page_update_gen() tried to promote this page? */
 		if (lru_gen_enabled() && !ignore_references &&
-		    page_mapped(page) && PageReferenced(page))
+		    page_mapped(page) && folio_is_referenced(page_folio(folio)))
 			goto keep_locked;
 
 		may_enter_fs = (sc->gfp_mask & __GFP_FS) ||

@@ -686,7 +686,7 @@ static void lru_deactivate_fn(struct page *page, struct lruvec *lruvec)
 
 	del_page_from_lru_list(page, lruvec);
 	ClearPageActive(page);
-	ClearPageReferenced(page);
+	folio_set_lru_refs(page_folio(page), 0);
 	add_page_to_lru_list(page, lruvec);
 
 	__count_vm_events(PGDEACTIVATE, nr_pages);
@@ -703,10 +703,8 @@ static void lru_lazyfree_fn(struct page *page, struct lruvec *lruvec)
 
 	del_page_from_lru_list(page, lruvec);
 	ClearPageActive(page);
-	if (lru_gen_enabled())
-		lru_gen_clear_refs(page);
-	else
-		ClearPageReferenced(page);
+	folio_set_lru_refs(page_folio(page), 0);
+
 	/*
 	 * Lazyfree pages are clean anonymous pages.  They have
 	 * PG_swapbacked flag cleared, to distinguish them from normal

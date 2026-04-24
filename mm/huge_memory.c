@@ -2000,8 +2000,8 @@ static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 			page = pmd_page(old_pmd);
 			if (!PageDirty(page) && pmd_dirty(old_pmd))
 				set_page_dirty(page);
-			if (!PageReferenced(page) && pmd_young(old_pmd))
-				SetPageReferenced(page);
+			if (!folio_is_referenced(page_folio(page)) && pmd_young(old_pmd))
+				folio_mark_referenced(page_folio(page));
 			page_remove_rmap(page, true);
 			put_page(page);
 		}

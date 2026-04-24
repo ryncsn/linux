@@ -389,7 +389,7 @@ static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
 			tlb_remove_pmd_tlb_entry(tlb, pmd, addr);
 		}
 
-		ClearPageReferenced(page);
+		folio_set_lru_refs(page_folio(page), 0);
 		test_and_clear_page_young(page);
 		if (pageout) {
 			if (!isolate_lru_page(page)) {
@@ -487,7 +487,7 @@ regular_page:
 		 * As a side effect, it makes confuse idle-page tracking
 		 * because they will miss recent referenced history.
 		 */
-		ClearPageReferenced(page);
+		folio_set_lru_refs(page_folio(page), 0);
 		test_and_clear_page_young(page);
 		if (pageout) {
 			if (!isolate_lru_page(page)) {

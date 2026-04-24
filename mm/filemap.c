@@ -1976,7 +1976,7 @@ no_page:
 
 		/* Init accessed so avoid atomic mark_page_accessed later */
 		if (fgp_flags & FGP_ACCESSED)
-			__SetPageReferenced(page);
+			__folio_init_referenced(page_folio(page));
 
 		err = add_to_page_cache_lru(page, mapping, index, gfp_mask);
 		if (unlikely(err)) {
