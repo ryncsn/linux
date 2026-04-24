@@ -297,18 +297,19 @@ void lru_note_cost_page(struct page *page)
 
 static void __activate_page(struct page *page, struct lruvec *lruvec)
 {
-	if (!PageActive(page) && !PageUnevictable(page)) {
-		int nr_pages = thp_nr_pages(page);
+	int nr_pages = thp_nr_pages(page);
 
-		del_page_from_lru_list(page, lruvec);
-		SetPageActive(page);
-		add_page_to_lru_list(page, lruvec);
-		trace_mm_lru_activate(page);
+	if (PageActive(page) || PageUnevictable(page))
+		return;
 
-		__count_vm_events(PGACTIVATE, nr_pages);
-		__count_memcg_events(lruvec_memcg(lruvec), PGACTIVATE,
-				     nr_pages);
-	}
+	del_page_from_lru_list(page, lruvec);
+	SetPageActive(page);
+	add_page_to_lru_list(page, lruvec);
+	trace_mm_lru_activate(page);
+
+	__count_vm_events(PGACTIVATE, nr_pages);
+	__count_memcg_events(lruvec_memcg(lruvec), PGACTIVATE,
+			     nr_pages);
 }
 
 #ifdef CONFIG_SMP
@@ -350,12 +351,13 @@ void activate_page(struct page *page)
 	struct lruvec *lruvec;
 
 	page = compound_head(page);
-	if (TestClearPageLRU(page)) {
-		lruvec = lock_page_lruvec_irq(page);
-		__activate_page(page, lruvec);
-		unlock_page_lruvec_irq(lruvec);
-		SetPageLRU(page);
-	}
+	if (!TestClearPageLRU(page))
+		return;
+
+	lruvec = lock_page_lruvec_irq(page);
+	__activate_page(page, lruvec);
+	unlock_page_lruvec_irq(lruvec);
+	SetPageLRU(page);
 }
 #endif
 
@@ -617,44 +619,44 @@ static void lru_deactivate_file_fn(struct page *page, struct lruvec *lruvec)
 
 static void lru_deactivate_fn(struct page *page, struct lruvec *lruvec)
 {
-	if (!PageUnevictable(page) && (PageActive(page) || lru_gen_enabled())) {
-		int nr_pages = thp_nr_pages(page);
+	int nr_pages = thp_nr_pages(page);
 
-		del_page_from_lru_list(page, lruvec);
-		ClearPageActive(page);
-		ClearPageReferenced(page);
-		add_page_to_lru_list(page, lruvec);
+	if (PageUnevictable(page) || !(PageActive(page) || lru_gen_enabled())
+		return;
 
-		__count_vm_events(PGDEACTIVATE, nr_pages);
-		__count_memcg_events(lruvec_memcg(lruvec), PGDEACTIVATE,
-				     nr_pages);
-	}
+	del_page_from_lru_list(page, lruvec);
+	ClearPageActive(page);
+	ClearPageReferenced(page);
+	add_page_to_lru_list(page, lruvec);
+
+	__count_vm_events(PGDEACTIVATE, nr_pages);
+	__count_memcg_events(lruvec_memcg(lruvec), PGDEACTIVATE, nr_pages);
 }
 
 static void lru_lazyfree_fn(struct page *page, struct lruvec *lruvec)
 {
-	if (PageAnon(page) && PageSwapBacked(page) &&
-	    !PageSwapCache(page) && !PageUnevictable(page)) {
-		int nr_pages = thp_nr_pages(page);
+	long nr_pages = thp_nr_pages(page);
 
-		del_page_from_lru_list(page, lruvec);
-		ClearPageActive(page);
-		if (lru_gen_enabled())
-			lru_gen_clear_refs(page);
-		else
-			ClearPageReferenced(page);
-		/*
-		 * Lazyfree pages are clean anonymous pages.  They have
-		 * PG_swapbacked flag cleared, to distinguish them from normal
-		 * anonymous pages
-		 */
-		ClearPageSwapBacked(page);
-		add_page_to_lru_list(page, lruvec);
+	if (!PageAnon(page) || !PageSwapBacked(page) ||
+	    PageSwapCache(page) || PageUnevictable(page))
+		return;
 
-		__count_vm_events(PGLAZYFREE, nr_pages);
-		__count_memcg_events(lruvec_memcg(lruvec), PGLAZYFREE,
-				     nr_pages);
-	}
+	del_page_from_lru_list(page, lruvec);
+	ClearPageActive(page);
+	if (lru_gen_enabled())
+		lru_gen_clear_refs(page);
+	else
+		ClearPageReferenced(page);
+	/*
+	 * Lazyfree pages are clean anonymous pages.  They have
+	 * PG_swapbacked flag cleared, to distinguish them from normal
+	 * anonymous pages
+	 */
+	ClearPageSwapBacked(page);
+	add_page_to_lru_list(page, lruvec);
+
+	__count_vm_events(PGLAZYFREE, nr_pages);
+	__count_memcg_events(lruvec_memcg(lruvec), PGLAZYFREE, nr_pages);
 }
 
 /*
