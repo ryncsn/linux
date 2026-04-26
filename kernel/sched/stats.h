@@ -215,14 +215,17 @@ static inline void psi_ttwu_dequeue(struct task_struct *p)
 	}
 }
 
-static inline void psi_sched_switch(struct task_struct *prev,
+static inline void psi_sched_switch(struct rq *rq;
+				    struct task_struct *prev,
 				    struct task_struct *next,
 				    bool sleep)
 {
 	if (static_branch_likely(&psi_disabled))
 		return;
 
-	psi_task_switch(prev, next, sleep);
+	psi_task_switch(prev == rq->idle ? NULL : prev,
+			next == rq->idle ? NULL : next,
+			sleep);
 }
 
 #else /* !CONFIG_PSI: */

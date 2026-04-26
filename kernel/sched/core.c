@@ -7179,7 +7179,7 @@ keep_resched:
 		++*switch_count;
 
 		psi_account_irqtime(rq, prev, next);
-		psi_sched_switch(prev, next, !task_on_rq_queued(prev) ||
+		psi_sched_switch(rq, prev, next, !task_on_rq_queued(prev) ||
 					     prev->se.sched_delayed);
 
 		trace_sched_switch(preempt, prev, next, prev_state);

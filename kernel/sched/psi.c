@@ -933,7 +933,7 @@ void psi_task_switch(struct task_struct *prev, struct task_struct *next,
 	psi_write_begin(cpu);
 	now = cpu_clock(cpu);
 
-	if (next->pid) {
+	if (next) {
 		psi_flags_change(next, 0, TSK_ONCPU);
 		/*
 		 * Set TSK_ONCPU on @next's cgroups. If @next shares any
@@ -951,7 +951,7 @@ void psi_task_switch(struct task_struct *prev, struct task_struct *next,
 		}
 	}
 
-	if (prev->pid) {
+	if (prev) {
 		int clear = TSK_ONCPU, set = 0;
 		bool wake_clock = true;
 
