@@ -1270,6 +1270,8 @@ enum page_references {
 	PAGEREF_ACTIVATE,
 };
 
+#ifdef CONFIG_LRU_GEN
+
 /*
  * Only used on a mapped folio in the eviction (rmap walk) path, where promotion
  * needs to be done by taking the folio off the LRU list and then adding it back
@@ -1289,6 +1291,12 @@ static bool lru_gen_set_refs(struct folio *folio)
 
 	return true;
 }
+#else
+static bool lru_gen_set_refs(struct folio *folio)
+{
+	return false;
+}
+#endif  /* CONFIG_LRU_GEN */
 
 static enum page_references page_check_references(struct page *page,
 						  struct scan_control *sc)
