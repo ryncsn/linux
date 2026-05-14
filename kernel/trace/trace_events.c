@@ -3880,8 +3880,6 @@ static __init int event_trace_enable(void)
 
 	early_enable_events(tr, false);
 
-	trace_printk_start_comm();
-
 	register_event_cmds();
 
 	register_trigger_cmds();

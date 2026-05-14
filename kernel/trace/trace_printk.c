@@ -52,37 +52,7 @@ static inline struct trace_bprintk_fmt *lookup_format(const char *fmt)
 static
 void hold_module_trace_bprintk_format(const char **start, const char **end)
 {
-	const char **iter;
-	char *fmt;
-
-	/* allocate the trace_printk per cpu buffers */
-	if (start != end)
-		trace_printk_init_buffers();
-
-	mutex_lock(&btrace_mutex);
-	for (iter = start; iter < end; iter++) {
-		struct trace_bprintk_fmt *tb_fmt = lookup_format(*iter);
-		if (tb_fmt) {
-			if (!IS_ERR(tb_fmt))
-				*iter = tb_fmt->fmt;
-			continue;
-		}
-
-		fmt = NULL;
-		tb_fmt = kmalloc(sizeof(*tb_fmt), GFP_KERNEL);
-		if (tb_fmt) {
-			fmt = kmalloc(strlen(*iter) + 1, GFP_KERNEL);
-			if (fmt) {
-				list_add_tail(&tb_fmt->list, &trace_bprintk_fmt_list);
-				strcpy(fmt, *iter);
-				tb_fmt->fmt = fmt;
-			} else
-				kfree(tb_fmt);
-		}
-		*iter = fmt;
-
-	}
-	mutex_unlock(&btrace_mutex);
+	/* trace_printk is disabled, no format storage needed */
 }
 
 static int module_trace_bprintk_format_notify(struct notifier_block *self,
@@ -185,11 +155,8 @@ static inline void format_mod_start(void) { }
 static inline void format_mod_stop(void) { }
 #endif /* CONFIG_MODULES */
 
-static bool __read_mostly trace_printk_enabled = false;
-
 void trace_printk_control(bool enabled)
 {
-	trace_printk_enabled = enabled;
 }
 
 __initdata_or_module static

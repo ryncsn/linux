@@ -5091,8 +5091,7 @@ int set_tracer_flag(struct trace_array *tr, unsigned int mask, int enabled)
 	}
 
 	if (mask == TRACE_ITER_PRINTK) {
-		trace_printk_start_stop_comm(enabled);
-		trace_printk_control(enabled);
+		/* trace_printk is disabled, comm recording not needed */
 	}
 
 	return 0;
@@ -9875,10 +9874,7 @@ __init static int tracer_alloc_buffers(void)
 	if (!alloc_cpumask_var(&global_trace.tracing_cpumask, GFP_KERNEL))
 		goto out_free_buffer_mask;
 
-	/* Only allocate trace_printk buffers if a trace_printk exists */
-	if (&__stop___trace_bprintk_fmt != &__start___trace_bprintk_fmt)
-		/* Must be called before global_trace.buffer is allocated */
-		trace_printk_init_buffers();
+	/* trace_printk is disabled, no buffer expansion needed */
 
 	/* To save memory, keep the ring buffer size to its minimum */
 	if (ring_buffer_expanded)
