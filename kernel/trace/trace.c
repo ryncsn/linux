@@ -3167,10 +3167,6 @@ void trace_printk_start_comm(void)
 {
 }
 
-static void trace_printk_start_stop_comm(int enabled)
-{
-}
-
 /**
  * trace_vbprintk - write binary msg to tracing buffer
  * @ip:    The address of the caller
