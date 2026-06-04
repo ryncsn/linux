@@ -1281,21 +1281,25 @@ enum page_references {
 static bool folio_promote_lru_refs(struct folio *folio)
 {
 	unsigned long new_flags, old_flags = READ_ONCE(*folio_flags(folio, 0));
-	int refs;
+	int refs, new_refs;
 
 	do {
 		new_flags = old_flags;
 		refs = lru_refs_from_flags(old_flags);
 		/*
-		 * Bump refs by one up to LRU_REFS_MAX.  Once we are at
-		 * LRU_REFS_MAX, leave the flags alone: the caller treats a
-		 * return of true (refs >= LRU_REFS_WORKINGSET) as a cue to
-		 * activate the folio, which resets refs to
-		 * LRU_REFS_WORKINGSET in lru_activate().
+		 * Promote refs by one and clamp to [LRU_REFS_WORKINGSET,
+		 * LRU_REFS_MAX].  Once we are at LRU_REFS_MAX, leave the
+		 * flags alone.
+		 *
+		 * The return value uses the refs from before this promotion,
+		 * so activation happens on the access after flags reach
+		 * LRU_REFS_WORKINGSET.
 		 */
 		if (refs == LRU_REFS_MAX)
 			break;
-		lru_refs_set_flags(&new_flags, ++refs);
+		new_refs = refs + 1;
+		new_refs = max_t(unsigned int, new_refs, LRU_REFS_WORKINGSET);
+		lru_refs_set_flags(&new_flags, new_refs);
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
 	return refs >= LRU_REFS_WORKINGSET;

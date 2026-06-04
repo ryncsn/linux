@@ -295,13 +295,18 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
 
 	mod_lruvec_state(lruvec, WORKINGSET_REFAULT_BASE + type, delta);
 
+	refs = ((token & (BIT(LRU_REFS_BITS) - 1)) << 1) + workingset;
+	if (refs) {
+		folio_set_lru_refs(folio, refs);
+		mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
+	}
+
 	if (!recent)
 		goto unlock;
 
 	lrugen = &lruvec->lrugen;
 
 	hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
-	refs = ((token & (BIT(LRU_REFS_BITS) - 1)) << 1) + workingset;
 	tier = lru_tier_from_refs(refs);
 
 	atomic_long_add(delta, &lrugen->refaulted[hist][type][tier]);
@@ -310,10 +315,6 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
 	if (lru_gen_in_fault())
 		mod_lruvec_state(lruvec, WORKINGSET_ACTIVATE_BASE + type, delta);
 
-	if (refs) {
-		folio_set_lru_refs(folio, refs);
-		mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
-	}
 unlock:
 	rcu_read_unlock();
 }
