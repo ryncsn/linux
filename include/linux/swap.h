@@ -194,6 +194,20 @@ struct swap_extent {
 	((offsetof(union swap_header, magic.magic) - \
 	  offsetof(union swap_header, info.badpages)) / sizeof(int))
 
+/*
+ * Swap device flags, except the ones documented below, all are immutable
+ * after exposed by swap_device_enable, and until the device is freed again
+ * (SWP_USED unset). The exceptions are all protected by swap_lock:
+ * - SWP_USED: Indicates the device is inuse. Once set, won't be cleared
+ *   unless all reference to this device is freed and swapoff finished.
+ * - SWP_WRITEOK: Indicates the device is still available. Gets cleared
+ *   upon swapoff start. Cluster locks are also used for synchronization so
+ *   checking this flag while cluster locks ensures the device is safe to
+ *   use. Note: clearing this flag doesn't block pending IO going to this
+ *   device but it prevents further entry allocation or discard request
+ *   from initiating.
+ * - SWP_HIBERNATION: Indicates if the device is pinned for hibernation.
+ */
 enum {
 	SWP_USED	= (1 << 0),	/* is slot in swap_info[] used? */
 	SWP_WRITEOK	= (1 << 1),	/* ok to write to this swap?	*/
@@ -263,14 +277,12 @@ struct swap_info_struct {
 	struct file *swap_file;		/* seldom referenced */
 	struct completion comp;		/* seldom referenced */
 	spinlock_t lock;		/*
-					 * protect map scan related fields like
+					 * Protect map scan related fields like
 					 * inuse_pages and all cluster lists.
 					 * Other fields are only changed
 					 * at swapon/swapoff, so are protected
-					 * by swap_lock. changing flags need
-					 * hold this lock and swap_lock. If
-					 * both locks need hold, hold swap_lock
-					 * first.
+					 * by swap_lock. swap_lock should be
+					 * locked first if needed.
 					 */
 	struct work_struct discard_work; /* discard worker */
 	struct work_struct reclaim_work; /* reclaim worker */
