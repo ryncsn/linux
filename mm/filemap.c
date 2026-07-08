@@ -82,7 +82,6 @@
  *
  *  ->i_mmap_rwsem		(truncate_pagecache)
  *    ->private_lock		(__free_pte->block_dirty_folio)
- *      ->swap_lock		(exclusive_swap_page, others)
  *        ->i_pages lock
  *
  *  ->i_rwsem
@@ -112,7 +111,6 @@
  *    ->page_table_lock or pte_lock	(anon_vma_prepare and various)
  *
  *  ->page_table_lock or pte_lock
- *    ->swap_lock		(try_to_unmap_one)
  *    ->private_lock		(try_to_unmap_one)
  *    ->i_pages lock		(try_to_unmap_one)
  *    ->lruvec->lru_lock	(follow_page_mask->mark_page_accessed)

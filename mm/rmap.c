@@ -29,7 +29,6 @@
  *             mapping->i_mmap_rwsem
  *               anon_vma->rwsem
  *                 mm->page_table_lock or pte_lock
- *                   swap_lock (in swap_duplicate, swap_info_get)
  *                     mmlist_lock (in mmput, drain_mmlist and others)
  *                     mapping->private_lock (in block_dirty_folio)
  *                         i_pages lock (widely used)
