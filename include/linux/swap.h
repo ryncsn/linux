@@ -197,7 +197,7 @@ struct swap_extent {
 /*
  * Swap device flags, except the ones documented below, all are immutable
  * after exposed by swap_device_enable, and until the device is freed again
- * (SWP_USED unset). The exceptions are all protected by swap_lock:
+ * (SWP_USED unset). The exceptions are all protected by swapon_rwsem:
  * - SWP_USED: Indicates the device is inuse. Once set, won't be cleared
  *   unless all reference to this device is freed and swapoff finished.
  * - SWP_WRITEOK: Indicates the device is still available. Gets cleared
@@ -281,8 +281,8 @@ struct swap_info_struct {
 					 * inuse_pages and all cluster lists.
 					 * Other fields are only changed
 					 * at swapon/swapoff, so are protected
-					 * by swap_lock. swap_lock should be
-					 * locked first if needed.
+					 * by swapon_rwsem. swapon_rwsem should
+					 * be acquired first if needed.
 					 */
 	struct work_struct discard_work; /* discard worker */
 	struct work_struct reclaim_work; /* reclaim worker */
