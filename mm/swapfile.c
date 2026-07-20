@@ -3745,31 +3745,7 @@ static void free_swap_count_continuations(struct swap_info_struct *si)
 #if defined(CONFIG_MEMCG) && defined(CONFIG_BLK_CGROUP)
 void __cgroup_throttle_swaprate(struct page *page, gfp_t gfp_mask)
 {
-	struct swap_info_struct *si, *next;
-	int nid = page_to_nid(page);
-
-	if (!(gfp_mask & __GFP_IO))
-		return;
-
-	if (!blk_cgroup_congested())
-		return;
-
-	/*
-	 * We've already scheduled a throttle, avoid taking the global swap
-	 * lock.
-	 */
-	if (current->throttle_queue)
-		return;
-
-	spin_lock(&swap_avail_lock);
-	plist_for_each_entry_safe(si, next, &swap_avail_heads[nid],
-				  avail_lists[nid]) {
-		if (si->bdev) {
-			blkcg_schedule_throttle(bdev_get_queue(si->bdev), true);
-			break;
-		}
-	}
-	spin_unlock(&swap_avail_lock);
+	return;
 }
 #endif
 
