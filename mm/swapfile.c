@@ -89,6 +89,35 @@ PLIST_HEAD(swap_active_head);
 static struct plist_head *swap_avail_heads;
 static DEFINE_SPINLOCK(swap_avail_lock);
 
+/*
+ * The only enabled swap device, cached when there is exactly one (the
+ * common configuration on Android).  It lets get_swap_pages() allocate
+ * directly from the device, without taking swap_avail_lock or walking
+ * the swap_avail_heads priority lists.
+ *
+ * Updated with swap_lock held whenever swap_active_head changes; read
+ * locklessly via READ_ONCE().  A swap_info_struct is never freed once
+ * published in swap_info[], so a stale pointer can only refer to a
+ * device that is being swapped off, which is detected by checking
+ * SWP_WRITEOK under si->lock.
+ */
+static struct swap_info_struct *single_swap;
+
+/*
+ * Recompute single_swap after swap_active_head changed.
+ * Call with swap_lock held.
+ */
+static void update_single_swap(void)
+{
+	struct swap_info_struct *p = NULL;
+
+	if (!plist_head_empty(&swap_active_head) &&
+	    plist_first(&swap_active_head) == plist_last(&swap_active_head))
+		p = plist_first_entry(&swap_active_head,
+				      struct swap_info_struct, list);
+	WRITE_ONCE(single_swap, p);
+}
+
 struct swap_info_struct *swap_info[MAX_SWAPFILES];
 
 static DEFINE_MUTEX(swapon_mutex);
@@ -1041,75 +1070,43 @@ static void swap_free_cluster(struct swap_info_struct *si, unsigned long idx)
 int get_swap_pages(int n_goal, swp_entry_t swp_entries[], int entry_size)
 {
 	unsigned long size = swap_entry_size(entry_size);
-	struct swap_info_struct *si, *next;
+	struct swap_info_struct *si;
 	long avail_pgs;
 	int n_ret = 0;
-	int node;
 
 	spin_lock(&swap_avail_lock);
-
 	avail_pgs = atomic_long_read(&nr_swap_pages) / size;
 	if (avail_pgs <= 0) {
 		spin_unlock(&swap_avail_lock);
-		goto noswap;
+		return 0;
 	}
 
 	n_goal = min3((long)n_goal, (long)SWAP_BATCH, avail_pgs);
-
 	atomic_long_sub(n_goal * size, &nr_swap_pages);
+	spin_unlock(&swap_avail_lock);
 
-start_over:
-	node = numa_node_id();
-	plist_for_each_entry_safe(si, next, &swap_avail_heads[node], avail_lists[node]) {
-		spin_unlock(&swap_avail_lock);
+	/* Always only use the first swap device, just ignore the others. */
+	si = READ_ONCE(single_swap);
+	if (si) {
 		spin_lock(&si->lock);
-		if (!si->highest_bit || !(si->flags & SWP_WRITEOK)) {
-			spin_lock(&swap_avail_lock);
-			if (plist_node_empty(&si->avail_lists[node])) {
-				spin_unlock(&si->lock);
-				goto nextsi;
-			}
-			__del_from_avail_list(si);
+		if (unlikely(!si->highest_bit || !(si->flags & SWP_WRITEOK))) {
 			spin_unlock(&si->lock);
-			goto nextsi;
+			goto check_out;
 		}
 		if (size == SWAPFILE_CLUSTER) {
 			if (si->flags & SWP_BLKDEV)
 				n_ret = swap_alloc_cluster(si, swp_entries);
-		} else
+		} else {
 			n_ret = scan_swap_map_slots(si, SWAP_HAS_CACHE,
 						    n_goal, swp_entries);
+		}
 		spin_unlock(&si->lock);
-		if (n_ret || size == SWAPFILE_CLUSTER)
-			goto check_out;
-		pr_debug("scan_swap_map of si %d failed to find offset\n",
-			si->type);
-		cond_resched();
-
-		spin_lock(&swap_avail_lock);
-nextsi:
-		/*
-		 * if we got here, it's likely that si was almost full before,
-		 * and since scan_swap_map_slots() can drop the si->lock,
-		 * multiple callers probably all tried to get a page from the
-		 * same si and it filled up before we could get one; or, the si
-		 * filled up between us dropping swap_avail_lock and taking
-		 * si->lock. Since we dropped the swap_avail_lock, the
-		 * swap_avail_head list may have been modified; so if next is
-		 * still in the swap_avail_head list then try it, otherwise
-		 * start over if we have not gotten any slots.
-		 */
-		if (plist_node_empty(&next->avail_lists[node]))
-			goto start_over;
 	}
-
-	spin_unlock(&swap_avail_lock);
 
 check_out:
 	if (n_ret < n_goal)
 		atomic_long_add((long)(n_goal - n_ret) * size,
 				&nr_swap_pages);
-noswap:
 	return n_ret;
 }
 
@@ -2424,6 +2421,7 @@ static void _enable_swap_info(struct swap_info_struct *p)
 	 * swap_info_struct.
 	 */
 	plist_add(&p->list, &swap_active_head);
+	update_single_swap();
 	add_to_avail_list(p);
 }
 
@@ -2537,6 +2535,7 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 		least_priority++;
 	}
 	plist_del(&p->list, &swap_active_head);
+	update_single_swap();
 	atomic_long_sub(p->pages, &nr_swap_pages);
 	total_swap_pages -= p->pages;
 	p->flags &= ~SWP_WRITEOK;
