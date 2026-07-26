@@ -215,6 +215,7 @@ static inline int lru_refs_from_flags(unsigned long flags)
 static inline void lru_refs_set_flags(unsigned long *flags, unsigned int refs)
 {
 	VM_WARN_ON_ONCE(refs > LRU_REFS_MAX);
+	BUILD_BUG_ON((LRU_REFS_MAX >> 2) > (BIT(LRU_REFS_WIDTH) - 1));
 
 	*flags &= ~LRU_REFS_FLAGS;
 	if (refs & BIT(0))
@@ -292,34 +293,34 @@ static inline void __folio_init_referenced(struct folio *folio)
  * folio_mark_referenced_by_bit - Mark a folio as referenced by bit.
  * @folio: the folio.
  *
- * non-MGLRU may want to make use the lowest LRU referenced count bit
- * explicitely as a referenced mark.
+ * non-MGLRU may want to make use of the lowest LRU referenced count bit
+ * explicitly as a referenced mark.
  */
 static inline void folio_mark_referenced_by_bit(struct folio *folio)
 {
-	set_mask_bits(folio_flags(folio, 0), BIT(PG_referenced), BIT(PG_referenced));
+	set_bit(PG_referenced, folio_flags(folio, 0));
 }
 
 /**
- * folio_clear_referenced_by_bit - Mark a folio as referenced exactly once.
+ * folio_clear_referenced_by_bit - Clear the referenced bit of a folio.
  * @folio: the folio.
  */
 static inline void folio_clear_referenced_by_bit(struct folio *folio)
 {
-	set_mask_bits(folio_flags(folio, 0), BIT(PG_referenced), 0);
+	clear_bit(PG_referenced, folio_flags(folio, 0));
 }
 
 /**
- * folio_test_clear_referenced_bit - Test and clear the referenced bit
+ * folio_test_clear_referenced_by_bit - Test and clear the referenced bit
  * @folio: the folio.
  */
-static inline bool folio_test_clear_referenced_bit(struct folio *folio)
+static inline bool folio_test_clear_referenced_by_bit(struct folio *folio)
 {
 	return test_and_clear_bit(PG_referenced, folio_flags(folio, 0));
 }
 
 /**
- * folio_is_referenced_by_bit - Mark a folio as referenced at least once.
+ * folio_is_referenced_by_bit - Test if the referenced bit of a folio is set.
  * @folio: the folio.
  */
 static inline bool folio_is_referenced_by_bit(const struct folio *folio)
@@ -341,14 +342,12 @@ static inline bool folio_is_workingset(const struct folio *folio)
 }
 
 /**
- * folio_mark_workingset_by_bit - Mark a folio as part of the workingset.
+ * folio_mark_workingset_by_bit - Set the workingset bit of a folio.
  * @folio: the folio.
- *
- * Force set a folio's LRU referenced count to at least LRU_REFS_WORKINGSET.
  */
 static inline void folio_mark_workingset_by_bit(struct folio *folio)
 {
-	set_mask_bits(folio_flags(folio, 0), BIT(PG_workingset), BIT(PG_workingset));
+	set_bit(PG_workingset, folio_flags(folio, 0));
 }
 
 static inline void folio_migrate_refs(struct folio *new, const struct folio *old)
@@ -385,6 +384,7 @@ static inline int lru_hist_from_seq(unsigned long seq)
 
 static inline int lru_tier_from_refs(unsigned int refs)
 {
+	BUILD_BUG_ON(fls(LRU_REFS_MAX - 1) > MAX_NR_TIERS - 1);
 	VM_WARN_ON_ONCE(refs > LRU_REFS_MAX);
 	if (refs < LRU_REFS_WORKINGSET)
 		return 0;
@@ -414,12 +414,13 @@ static inline int lru_gen_from_flags(unsigned long flags)
  */
 static inline void lru_gen_set_flags(unsigned long *flags, int gen)
 {
-	VM_WARN_ON_ONCE(gen > LRU_GEN_MAX || gen < 0);
 	BUILD_BUG_ON((LRU_GEN_MAX + 1) != MAX_NR_GENS);
-
+	VM_WARN_ON_ONCE(gen > LRU_GEN_MAX || gen < 0);
 	*flags &= ~LRU_GEN_MASK;
 	*flags |= (gen + 1UL) << LRU_GEN_PGOFF;
 }
+
+int folio_inc_lru_refs(struct folio *folio, bool promote, bool is_exec);
 
 static inline int folio_lru_gen(const struct folio *folio)
 {
@@ -428,7 +429,7 @@ static inline int folio_lru_gen(const struct folio *folio)
 
 static inline bool lru_gen_is_active(const struct lruvec *lruvec, int gen)
 {
-	unsigned long max_seq = lruvec->lrugen.max_seq;
+	unsigned long max_seq = READ_ONCE(lruvec->lrugen.max_seq);
 
 	VM_WARN_ON_ONCE(gen > LRU_GEN_MAX);
 
@@ -502,7 +503,7 @@ static inline unsigned long lru_gen_folio_seq(const struct lruvec *lruvec,
 	 * |<------------------------------------ MAX_NR_GENS ----------------------------------->|
 	 */
 	if (folio_test_active(folio))
-		gen = MIN_NR_GENS - (refs >= LRU_REFS_WORKINGSET);
+		gen = MIN_NR_GENS - (refs >= LRU_REFS_PROTECTED);
 	else if (reclaiming)
 		gen = MAX_NR_GENS;
 	else if ((!folio_is_file_lru(folio) && !folio_test_swapcache(folio)) ||

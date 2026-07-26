@@ -303,8 +303,9 @@ static void __activate_page(struct page *page, struct lruvec *lruvec)
 		return;
 
 	del_page_from_lru_list(page, lruvec);
+	if (lru_gen_enabled())
+		folio_set_lru_refs(page_folio(page), LRU_REFS_PROTECTED);
 	SetPageActive(page);
-	folio_set_lru_refs(folio, LRU_REFS_WORKINGSET);
 	add_page_to_lru_list(page, lruvec);
 	trace_mm_lru_activate(page);
 
@@ -394,88 +395,6 @@ static void __lru_cache_activate_page(struct page *page)
 
 #ifdef CONFIG_LRU_GEN
 
-static void folio_inc_lru_refs(struct folio *folio)
-{
-	int type, refs, gen, new_gen, max_gen, min_gen;
-	unsigned long new_flags, old_flags, max_seq;
-	struct lru_gen_folio *lrugen = NULL;
-	struct lruvec *lruvec = NULL;
-	bool isolated = false;
-
-	if (folio_test_unevictable(folio))
-		return;
-
-	old_flags = READ_ONCE(*folio_flags(folio, 0));
-	do {
-		new_flags = old_flags;
-		gen = lru_gen_from_flags(old_flags);
-		refs = lru_refs_from_flags(old_flags) + 1;
-		new_gen = gen;
-		if (gen < 0)
-			goto out;
-
-		/*
-		 * To promote frequently used folios, prevent isolation
-		 * first, it's a lazy promotion so no LRU lock needed.
-		 */
-		if (!isolated) {
-			if (!folio_test_clear_lru(folio))
-				goto out;
-			isolated = true;
-			old_flags &= ~BIT(PG_lru);
-			new_flags = old_flags;
-			rcu_read_lock();
-			lruvec = folio_lruvec(folio);
-			lrugen = &lruvec->lrugen;
-		}
-
-		max_seq = READ_ONCE(lrugen->max_seq);
-		max_gen = lru_gen_from_seq(max_seq);
-		if (gen == max_gen)
-			goto out;
-
-		/*
-		 * Always promote if we hit LRU_REFS_MAX, else, only promote
-		 * from oldest gen.
-		 */
-		if (refs <= LRU_REFS_MAX) {
-			type = folio_is_file_lru(folio);
-			min_gen = lru_gen_from_seq(READ_ONCE(lrugen->min_seq[type]));
-			if (gen != min_gen)
-				goto out;
-		} else {
-			refs = LRU_REFS_PROTECTED;
-		}
-
-		new_gen = (gen + 1UL) % MAX_NR_GENS;
-		lru_gen_set_flags(&new_flags, new_gen);
-out:
-		lru_refs_set_flags(&new_flags, min_t(unsigned int, refs, LRU_REFS_MAX));
-		if (isolated)
-			new_flags |= BIT(PG_lru);
-	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
-
-	if (isolated) {
-		bool reactive = false;
-
-		if (new_gen != gen) {
-			/*
-			 * It's possible that the folio is concurrently promoted to
-			 * latest gen, so the promotion above causes gen inversion.
-			 * The window is tiny but in such case, just activate the folio.
-			 */
-			if (max_seq != READ_ONCE(lrugen->max_seq))
-				reactive = true;
-			lru_gen_update_size(lruvec, folio, gen, new_gen);
-		}
-
-		rcu_read_unlock();
-
-		if (reactive)
-			folio_activate(folio);
-	}
-}
-
 static bool lru_gen_clear_refs(struct folio *folio)
 {
 	struct lru_gen_struct *lrugen;
@@ -493,10 +412,6 @@ static bool lru_gen_clear_refs(struct folio *folio)
 }
 
 #else
-
-static void folio_inc_lru_refs(struct folio *folio)
-{
-}
 
 static bool lru_gen_clear_refs(struct folio *folio)
 {
@@ -520,7 +435,8 @@ void mark_page_accessed(struct page *page)
 	page = compound_head(page);
 
 	if (lru_gen_enabled()) {
-		folio_inc_lru_refs(page_folio(page));
+		if (!folio_test_unevictable(page_folio(page)))
+			folio_inc_lru_refs(page_folio(page), false, false);
 		return;
 	}
 

@@ -12,6 +12,7 @@
 #include <linux/pagemap.h>
 #include <linux/rmap.h>
 #include <linux/swap.h>
+#include <linux/mm_inline.h>
 
 #include "../internal.h"
 #include "prmtv-common.h"
@@ -229,7 +230,8 @@ static unsigned long damon_pa_apply_scheme(struct damon_ctx *ctx,
 		if (!page)
 			continue;
 
-		ClearPageReferenced(page);
+		if (!lru_gen_enabled())
+			ClearPageReferenced(page);
 		test_and_clear_page_young(page);
 		if (isolate_lru_page(page)) {
 			put_page(page);

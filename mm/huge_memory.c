@@ -1925,6 +1925,13 @@ out:
 }
 #endif /* CONFIG_HAVE_ARCH_TRANSPARENT_HUGEPAGE_PUD */
 
+static inline bool vma_has_recency(struct vm_area_struct *vma)
+{
+	if (vma->vm_flags & (VM_SEQ_READ | VM_RAND_READ))
+		return false;
+	return true;
+}
+
 static void __split_huge_zero_page_pmd(struct vm_area_struct *vma,
 		unsigned long haddr, pmd_t *pmd)
 {
@@ -2000,8 +2007,8 @@ static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 			page = pmd_page(old_pmd);
 			if (!PageDirty(page) && pmd_dirty(old_pmd))
 				set_page_dirty(page);
-			if (!folio_is_referenced(page_folio(page)) && pmd_young(old_pmd))
-				folio_mark_referenced(page_folio(page));
+			if (pmd_young(old_pmd) && vma_has_recency(vma))
+				mark_page_accessed(page);
 			page_remove_rmap(page, true);
 			put_page(page);
 		}

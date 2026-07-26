@@ -447,6 +447,22 @@ static void smaps_page_accumulate(struct mem_size_stats *mss,
 	}
 }
 
+static bool smap_check_folio_referenced(struct folio *folio)
+{
+	if (lru_gen_enabled())
+		return folio_is_referenced(folio);
+	else
+		return folio_is_referenced_by_bit(folio);
+}
+
+static void smap_clear_folio_referenced(struct folio *folio)
+{
+	if (lru_gen_enabled())
+		folio_set_lru_refs(folio, 0);
+	else
+		folio_clear_referenced_by_bit(folio);
+}
+
 static void smaps_account(struct mem_size_stats *mss, struct page *page,
 		bool compound, bool young, bool dirty, bool locked,
 		bool migration)
@@ -466,7 +482,7 @@ static void smaps_account(struct mem_size_stats *mss, struct page *page,
 
 	mss->resident += size;
 	/* Accumulate the size in pages that have been accessed. */
-	if (young || page_is_young(page) || PageReferenced(page))
+	if (young || page_is_young(page) || smap_check_folio_referenced(page_folio(page)))
 		mss->referenced += size;
 
 	/*
@@ -1186,7 +1202,7 @@ static int clear_refs_pte_range(pmd_t *pmd, unsigned long addr,
 		/* Clear accessed and referenced bits. */
 		pmdp_test_and_clear_young(vma, addr, pmd);
 		test_and_clear_page_young(page);
-		ClearPageReferenced(page);
+		smap_clear_folio_referenced(page_folio(page));
 out:
 		spin_unlock(ptl);
 		return 0;
@@ -1214,7 +1230,7 @@ out:
 		/* Clear accessed and referenced bits. */
 		ptep_test_and_clear_young(vma, addr, pte);
 		test_and_clear_page_young(page);
-		ClearPageReferenced(page);
+		smap_clear_folio_referenced(page_folio(page));
 	}
 	pte_unmap_unlock(pte - 1, ptl);
 	cond_resched();

@@ -315,6 +315,27 @@ static long madvise_willneed(struct vm_area_struct *vma,
 	return 0;
 }
 
+/*
+ * We are deactivating a folio for accelerating reclaiming.
+ * VM couldn't reclaim the folio unless we clear PG_young.
+ * As a side effect, it makes confuse idle-page tracking
+ * because they will miss recent referenced history.
+ */
+static void madvise_cold_or_pageout_prep_folio(struct folio *folio)
+{
+	test_and_clear_page_young((struct page *)folio);
+
+	/*
+	 * MGLRU clears all reference flags in folio_deactivate,
+	 * no need to touch it here.
+	 */
+	if (!lru_gen_enabled()) {
+		folio_clear_referenced_by_bit(folio);
+		if (folio_test_active(folio))
+			folio_mark_workingset_by_bit(folio);
+	}
+}
+
 static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
 				unsigned long addr, unsigned long end,
 				struct mm_walk *walk)
@@ -389,8 +410,7 @@ static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
 			tlb_remove_pmd_tlb_entry(tlb, pmd, addr);
 		}
 
-		folio_set_lru_refs(page_folio(page), 0);
-		test_and_clear_page_young(page);
+		madvise_cold_or_pageout_prep_folio(page_folio(page));
 		if (pageout) {
 			if (!isolate_lru_page(page)) {
 				if (PageUnevictable(page))
@@ -487,8 +507,7 @@ regular_page:
 		 * As a side effect, it makes confuse idle-page tracking
 		 * because they will miss recent referenced history.
 		 */
-		folio_set_lru_refs(page_folio(page), 0);
-		test_and_clear_page_young(page);
+		madvise_cold_or_pageout_prep_folio(page_folio(page));
 		if (pageout) {
 			if (!isolate_lru_page(page)) {
 				if (PageUnevictable(page))
