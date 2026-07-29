@@ -484,15 +484,14 @@ void lru_cache_add(struct page *page)
 	VM_BUG_ON_PAGE(PageActive(page) && PageUnevictable(page), page);
 	VM_BUG_ON_PAGE(PageLRU(page), page);
 
-	/* see the comment in lru_gen_add_folio() */
+	/*
+	 * For prefaulted file folios, increase its LRU refs number so
+	 * they will be protected properly.
+	 */
 	if (lru_gen_enabled() && !PageUnevictable(page) &&
-	    lru_gen_in_fault() && !(current->flags & PF_MEMALLOC)) {
-		bool bypass = false;
-
-		trace_android_vh_lru_cache_add_page_activate(page, &bypass);
-		if (!bypass)
-			SetPageActive(page);
-	}
+	    lru_gen_in_fault() && !(current->flags & PF_MEMALLOC) &&
+	    !folio_lru_refs(page_folio(page)))
+		folio_set_lru_refs(page_folio(page), LRU_REFS_REFERENCED);
 
 	get_page(page);
 	local_lock(&lru_pvecs.lock);
