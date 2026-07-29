@@ -493,14 +493,14 @@ static inline unsigned long lru_gen_folio_seq(const struct lruvec *lruvec,
 	/*
 	 * +-------------------------------------------+------------------------------------------+
 	 * |     Accessed through page tables and      |     Accessed through file descriptors    |
-	 * |     promoted by folio_update_gen()        |     and protected by folio_inc_gen()     |
-	 * +------0------------------------------------+------------------------------------------+
+	 * |     promoted by folio_inc_lru_refs_walk() |     protected by folio_inc_lru_refs/inc_gen  |
+	 * +------------------------------------------+------------------------------------------+
 	 * |      PG_active (set while isolated)       |                                          |
 	 * +---------------------+---------------------+--------------------+---------------------+
-	 * |     LRU_REFS_MAX    | LRU_REFS_REFERENCED |    LRU_REFS_MAX    | LRU_REFS_REFERENCED |
-	 * +-------------------------------------------+------------------------------------------+
-	 * |<-------------- MIN_NR_GENS -------------->|                                          |
-	 * |<------------------------------------ MAX_NR_GENS ----------------------------------->|
+	 * |     LRU_REFS_MAX    | LRU_REFS_PROTECTED |    LRU_REFS_MAX    | LRU_REFS_REFERENCED |
+	 * +------------------------------------------+------------------------------------------+
+	 * |<-------------- MIN_NR_GENS ------------->|                                          |
+	 * |<----------------------------------- MAX_NR_GENS ----------------------------------->|
 	 */
 	if (folio_test_active(folio))
 		gen = MIN_NR_GENS - (refs >= LRU_REFS_PROTECTED);
@@ -511,7 +511,7 @@ static inline unsigned long lru_gen_folio_seq(const struct lruvec *lruvec,
 		  (folio_test_dirty(folio) || folio_test_writeback(folio))))
 		gen = MIN_NR_GENS;
 	else
-		gen = MAX_NR_GENS - (refs >= LRU_REFS_REFERENCED);
+		gen = MAX_NR_GENS - (refs >= LRU_REFS_WORKINGSET);
 
 	return max(READ_ONCE(lrugen->max_seq) - gen + 1, READ_ONCE(lrugen->min_seq[type]));
 }

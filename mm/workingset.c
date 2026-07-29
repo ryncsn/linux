@@ -307,7 +307,7 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
 
 	atomic_long_add(delta, &lrugen->refaulted[hist][type][tier]);
 
-	if (lru_gen_in_fault() && refs >= LRU_REFS_WORKINGSET) {
+	if (refs >= LRU_REFS_WORKINGSET && lru_gen_in_fault()) {
 		folio_set_active(folio);
 		mod_lruvec_state(lruvec, WORKINGSET_ACTIVATE_BASE + type, delta);
 	}

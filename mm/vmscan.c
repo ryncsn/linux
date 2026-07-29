@@ -1287,47 +1287,40 @@ int folio_inc_lru_refs(struct folio *folio, bool promote, bool is_exec)
 	int max_gen, min_gen;
 	int type, refs, gen, new_gen;
 	unsigned long new_flags, old_flags, max_seq;
-	struct lru_gen_folio *lrugen = NULL;
-	struct lruvec *isolated_lruvec = NULL;
+	struct lru_gen_folio *lrugen;
+	struct lruvec *lruvec;
 
-restart:
+	type = folio_is_file_lru(folio);
+	rcu_read_lock();
+	lruvec = folio_lruvec(folio);
+	lrugen = &lruvec->lrugen;
+
 	old_flags = READ_ONCE(*folio_flags(folio, 0));
 	do {
 		new_flags = old_flags;
 		gen = lru_gen_from_flags(old_flags);
 		refs = lru_refs_from_flags(old_flags) + 1;
 		new_gen = gen;
-		if (gen < 0)
+		if (!(old_flags & BIT(PG_lru)) || gen < 0)
 			goto out;
 
-		/* Stablize the lruvec without lock for fast lazy promotion. */
-		if (!isolated_lruvec) {
-			if (!TestClearPageLRU(page_folio(folio)))
-				goto out;
-			rcu_read_lock();
-			isolated_lruvec = folio_lruvec(folio);
-			lrugen = &isolated_lruvec->lrugen;
-			goto restart;
-		}
-
-		type = folio_is_file_lru(folio);
 		max_seq = READ_ONCE(lrugen->max_seq);
 		max_gen = lru_gen_from_seq(max_seq);
 		min_gen = lru_gen_from_seq(READ_ONCE(lrugen->min_seq[type]));
 		if (gen == max_gen)
 			goto out;
 
+		/* Promote second page table access or executable */
 		if ((refs > LRU_REFS_REFERENCED && promote) || is_exec) {
-			/* Promote second page table access or executable */
 			refs = LRU_REFS_PROTECTED;
 			new_gen = max_gen;
 		} else if (refs > LRU_REFS_MAX) {
 			/* LRU refs counting overflow, bump the gen */
 			refs = LRU_REFS_PROTECTED;
 			new_gen = (gen + 1UL) % MAX_NR_GENS;
-		} else if (gen == min_gen) {
-			/* Defer eviction of just accessed folio */
-			refs = min_t(unsigned int, refs, LRU_REFS_PROTECTED);
+		} else if (gen == min_gen && refs > LRU_REFS_WORKINGSET) {
+			/* Defer eviction of re-accessed workingset */
+			refs = min_t(unsigned int, refs, LRU_REFS_WORKINGSET);
 			new_gen = (gen + 1UL) % MAX_NR_GENS;
 		}
 out:
@@ -1335,27 +1328,23 @@ out:
 		lru_refs_set_flags(&new_flags, refs);
 		if (new_gen >= 0)
 			lru_gen_set_flags(&new_flags, new_gen);
-		if (isolated_lruvec)
-			new_flags |= BIT(PG_lru);
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
-	if (isolated_lruvec) {
-		if (new_gen != gen) {
-			/*
-			 * Gen can only go forward, so concurrent aging is
-			 * usually fine, except when multiple aging increase
-			 * max_seq multiple times, new_gen may have go beyond
-			 * the new max_seq's current gen border and causes
-			 * hotness inversion. In that very unlikely case,
-			 * just activate the folio.
-			 */
-			lru_gen_update_size(isolated_lruvec, folio, gen, new_gen);
-			if (unlikely(READ_ONCE(lrugen->max_seq) - max_seq > MIN_NR_GENS))
-				folio_activate(folio);
-		}
-		rcu_read_unlock();
+	if (new_gen != gen) {
+		/*
+		 * Gen can only go forward, so concurrent aging is
+		 * usually fine, except when multiple aging increase
+		 * max_seq multiple times, new_gen may have go beyond
+		 * the new max_seq's current gen border and causes
+		 * hotness inversion. In that very unlikely case,
+		 * just activate the folio.
+		 */
+		lru_gen_update_size(lruvec, folio, gen, new_gen);
+		if (unlikely(READ_ONCE(lrugen->max_seq) - max_seq > MIN_NR_GENS))
+			folio_activate(folio);
 	}
 
+	rcu_read_unlock();
 	return refs;
 }
 
@@ -1374,10 +1363,10 @@ static bool folio_inc_lru_refs_isolated(struct folio *folio, unsigned long vm_fl
 		new_flags = old_flags;
 		refs = lru_refs_from_flags(old_flags) + 1;
 		/* Promote second page table access or executable */
-		if (is_exec_file_folio(folio, vm_flags))
+		if (refs > LRU_REFS_REFERENCED || is_exec_file_folio(folio, vm_flags))
 			refs = LRU_REFS_PROTECTED;
 		else
-			refs = min_t(unsigned int, refs, LRU_REFS_PROTECTED);
+			refs = min_t(unsigned int, refs, LRU_REFS_WORKINGSET);
 		lru_refs_set_flags(&new_flags, refs);
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
@@ -3725,7 +3714,7 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 			ret = gen;
 			*new_gen = (gen + 1) % MAX_NR_GENS;
 			lru_gen_set_flags(&new_flags, *new_gen);
-			lru_refs_set_flags(&new_flags, min_t(unsigned int, refs, LRU_REFS_PROTECTED));
+			lru_refs_set_flags(&new_flags, min_t(unsigned int, refs, LRU_REFS_WORKINGSET));
 		} else {
 			ret = -1;
 			lru_refs_set_flags(&new_flags, min_t(unsigned int, refs, LRU_REFS_MAX));
