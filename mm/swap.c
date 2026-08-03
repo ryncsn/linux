@@ -303,8 +303,6 @@ static void __activate_page(struct page *page, struct lruvec *lruvec)
 		return;
 
 	del_page_from_lru_list(page, lruvec);
-	if (lru_gen_enabled())
-		folio_set_lru_refs(page_folio(page), LRU_REFS_PROTECTED);
 	SetPageActive(page);
 	add_page_to_lru_list(page, lruvec);
 	trace_mm_lru_activate(page);
@@ -483,15 +481,6 @@ void lru_cache_add(struct page *page)
 
 	VM_BUG_ON_PAGE(PageActive(page) && PageUnevictable(page), page);
 	VM_BUG_ON_PAGE(PageLRU(page), page);
-
-	/*
-	 * For prefaulted file folios, increase its LRU refs number so
-	 * they will be protected properly.
-	 */
-	if (lru_gen_enabled() && !PageUnevictable(page) &&
-	    lru_gen_in_fault() && !(current->flags & PF_MEMALLOC) &&
-	    !folio_lru_refs(page_folio(page)))
-		folio_set_lru_refs(page_folio(page), LRU_REFS_REFERENCED);
 
 	get_page(page);
 	local_lock(&lru_pvecs.lock);
