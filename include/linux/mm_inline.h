@@ -420,7 +420,7 @@ static inline void lru_gen_set_flags(unsigned long *flags, int gen)
 	*flags |= (gen + 1UL) << LRU_GEN_PGOFF;
 }
 
-int folio_inc_lru_refs(struct folio *folio, bool promote, bool is_exec);
+int folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec);
 
 static inline int folio_lru_gen(const struct folio *folio)
 {
@@ -495,15 +495,15 @@ static inline unsigned long lru_gen_folio_seq(const struct lruvec *lruvec,
 	 * |     Accessed through page tables and      |     Accessed through file descriptors    |
 	 * |     promoted by folio_inc_lru_refs_walk() |     protected by folio_inc_lru_refs/inc_gen  |
 	 * +------------------------------------------+------------------------------------------+
-	 * |      PG_active (set while isolated)       |                                          |
+	 * |      PG_active (set at isolation or refault) |                                       |
 	 * +---------------------+---------------------+--------------------+---------------------+
-	 * |     LRU_REFS_MAX    | LRU_REFS_PROTECTED |    LRU_REFS_MAX    | LRU_REFS_REFERENCED |
+	 * |     LRU_REFS_MAX    | LRU_REFS_WORKINGSET |    LRU_REFS_MAX    | LRU_REFS_WORKINGSET |
 	 * +------------------------------------------+------------------------------------------+
 	 * |<-------------- MIN_NR_GENS ------------->|                                          |
 	 * |<----------------------------------- MAX_NR_GENS ----------------------------------->|
 	 */
 	if (folio_test_active(folio))
-		gen = MIN_NR_GENS - (refs >= LRU_REFS_PROTECTED);
+		gen = MIN_NR_GENS - (refs >= LRU_REFS_WORKINGSET);
 	else if (reclaiming)
 		gen = MAX_NR_GENS;
 	else if ((!folio_is_file_lru(folio) && !folio_test_swapcache(folio)) ||

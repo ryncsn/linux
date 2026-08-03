@@ -1280,9 +1280,9 @@ static inline bool is_exec_file_folio(struct folio *folio, unsigned long vm_flag
 /*
  * Update the folio's lru refs indicator without taking the folio lock,
  * isolation, or lruvec lock. Used by both page table access (@promote=true)
- * and by file access (@promote=false).
+ * and by file access (@is_fault=false).
  */
-int folio_inc_lru_refs(struct folio *folio, bool promote, bool is_exec)
+int folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
 {
 	int max_gen, min_gen;
 	int type, refs, gen, new_gen;
@@ -1310,18 +1310,21 @@ int folio_inc_lru_refs(struct folio *folio, bool promote, bool is_exec)
 		if (gen == max_gen)
 			goto out;
 
-		/* Promote second page table access or executable */
-		if ((refs > LRU_REFS_REFERENCED && promote) || is_exec) {
-			refs = LRU_REFS_PROTECTED;
-			new_gen = max_gen;
+		if (is_fault || is_exec) {
+			/* Promote second page table access or executable */
+			if (refs > LRU_REFS_REFERENCED || is_exec)
+				new_gen = max_gen;
+			else
+				new_gen = (gen + 1UL) % MAX_NR_GENS;
+			refs = min_t(unsigned int, refs, LRU_REFS_PROTECTED);
 		} else if (refs > LRU_REFS_MAX) {
 			/* LRU refs counting overflow, bump the gen */
+			new_gen = (gen + 1UL) % MAX_NR_GENS;
 			refs = LRU_REFS_PROTECTED;
+		} else if (gen == min_gen && refs >= LRU_REFS_WORKINGSET) {
+			/* Defer eviction of just accessed workingset */
 			new_gen = (gen + 1UL) % MAX_NR_GENS;
-		} else if (gen == min_gen && refs > LRU_REFS_WORKINGSET) {
-			/* Defer eviction of re-accessed workingset */
-			refs = min_t(unsigned int, refs, LRU_REFS_WORKINGSET);
-			new_gen = (gen + 1UL) % MAX_NR_GENS;
+			refs = min_t(unsigned int, refs, LRU_REFS_PROTECTED);
 		}
 out:
 		refs = min_t(unsigned int, refs, LRU_REFS_MAX);
@@ -1362,15 +1365,11 @@ static bool folio_inc_lru_refs_isolated(struct folio *folio, unsigned long vm_fl
 	do {
 		new_flags = old_flags;
 		refs = lru_refs_from_flags(old_flags) + 1;
-		/* Promote second page table access or executable */
-		if (refs > LRU_REFS_REFERENCED || is_exec_file_folio(folio, vm_flags))
-			refs = LRU_REFS_PROTECTED;
-		else
-			refs = min_t(unsigned int, refs, LRU_REFS_WORKINGSET);
-		lru_refs_set_flags(&new_flags, refs);
+		lru_refs_set_flags(&new_flags, min_t(unsigned int, refs, LRU_REFS_PROTECTED));
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
-	return refs > LRU_REFS_REFERENCED;
+	/* Promote second page table access or executable */
+	return refs > LRU_REFS_REFERENCED || is_exec_file_folio(folio, vm_flags);
 }
 #else
 static bool folio_inc_lru_refs_isolated(struct folio *folio, unsigned long vm_flags)
@@ -3607,8 +3606,8 @@ struct ctrl_pos {
 	int gain;
 };
 
-static void read_ctrl_pos(struct lruvec *lruvec, int type, int tier, int gain,
-			  struct ctrl_pos *pos)
+static void read_ctrl_pos(struct lruvec *lruvec, int type, int tier_min,
+			  int tier_max, int gain, struct ctrl_pos *pos)
 {
 	int i;
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
@@ -3617,7 +3616,7 @@ static void read_ctrl_pos(struct lruvec *lruvec, int type, int tier, int gain,
 	pos->gain = gain;
 	pos->refaulted = pos->total = 0;
 
-	for (i = tier % MAX_NR_TIERS; i <= min_t(int, tier, MAX_NR_TIERS - 1); i++) {
+	for (i = tier_min; i < tier_max; i++) {
 		pos->refaulted += lrugen->avg_refaulted[type][i] +
 				  atomic_long_read(&lrugen->refaulted[hist][type][i]);
 		pos->total += lrugen->avg_total[type][i] +
@@ -3690,31 +3689,25 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 				   unsigned long vm_flags, int *new_gen)
 {
 	unsigned long new_flags, old_flags = READ_ONCE(*folio_flags(folio, 0));
-	unsigned long min_seq = READ_ONCE(lruvec->lrugen.min_seq[folio_is_file_lru(folio)]);
 	unsigned long max_seq = READ_ONCE(lruvec->lrugen.max_seq);
-	int refs, gen, max_gen, min_gen, ret;
-	bool promote;
+	int refs, gen, max_gen, ret;
 
 	max_gen = lru_gen_from_seq(max_seq);
-	min_gen = lru_gen_from_seq(min_seq);
 
 	do {
 		gen = lru_gen_from_flags(old_flags);
 		refs = lru_refs_from_flags(old_flags) + 1;
 		new_flags = old_flags;
 
-		/* Promote second page table access or executable */
-		promote = refs > LRU_REFS_REFERENCED || is_exec_file_folio(folio, vm_flags);
-		if (gen >= 0 && gen != max_gen && promote) {
+		if (gen >= 0 && gen != max_gen) {
 			ret = gen;
-			*new_gen = max_gen;
+			/* Promote second page table access or executable */
+			if (refs > LRU_REFS_REFERENCED || is_exec_file_folio(folio, vm_flags))
+				*new_gen = max_gen;
+			else
+				*new_gen = (gen + 1) % MAX_NR_GENS;
 			lru_gen_set_flags(&new_flags, *new_gen);
-			lru_refs_set_flags(&new_flags, LRU_REFS_PROTECTED);
-		} else if (gen >= 0 && gen == min_gen) {
-			ret = gen;
-			*new_gen = (gen + 1) % MAX_NR_GENS;
-			lru_gen_set_flags(&new_flags, *new_gen);
-			lru_refs_set_flags(&new_flags, min_t(unsigned int, refs, LRU_REFS_WORKINGSET));
+			lru_refs_set_flags(&new_flags, min_t(unsigned int, refs, LRU_REFS_PROTECTED));
 		} else {
 			ret = -1;
 			lru_refs_set_flags(&new_flags, min_t(unsigned int, refs, LRU_REFS_MAX));
@@ -3725,7 +3718,7 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 }
 
 /* protect pages accessed multiple times through file descriptors */
-static int folio_inc_gen(struct lruvec *lruvec, struct folio *folio, bool reset)
+static int folio_inc_gen(struct lruvec *lruvec, struct folio *folio)
 {
 	int refs;
 	int type = folio_is_file_lru(folio);
@@ -3745,8 +3738,7 @@ static int folio_inc_gen(struct lruvec *lruvec, struct folio *folio, bool reset)
 
 		new_gen = (old_gen + 1) % MAX_NR_GENS;
 		lru_gen_set_flags(&new_flags, new_gen);
-		if (reset)
-			lru_refs_set_flags(&new_flags, min_t(unsigned int, refs, LRU_REFS_WORKINGSET));
+		lru_refs_set_flags(&new_flags, min_t(unsigned int, refs, LRU_REFS_WORKINGSET));
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
 	lru_gen_update_size(lruvec, folio, old_gen, new_gen);
@@ -4343,7 +4335,7 @@ static bool inc_min_seq(struct lruvec *lruvec, int type, int swappiness)
 			VM_WARN_ON_ONCE_FOLIO(folio_is_file_lru(folio) != type, folio);
 			VM_WARN_ON_ONCE_FOLIO(folio_zonenum(folio) != zone, folio);
 
-			new_gen = folio_inc_gen(lruvec, folio, false);
+			new_gen = folio_inc_gen(lruvec, folio);
 			list_move_tail(&folio->lru, &lrugen->lists[new_gen][type][zone]);
 
 			if (tier)
@@ -5018,7 +5010,7 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
 	if (tier > tier_idx) {
 		int hist = lru_hist_from_seq(lrugen->min_seq[type]);
 
-		gen = folio_inc_gen(lruvec, folio, true);
+		gen = folio_inc_gen(lruvec, folio);
 		list_move_tail(&folio->lru, &lrugen->lists[gen][type][zone]);
 
 		if (tier)
@@ -5030,7 +5022,7 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
 
 	/* ineligible */
 	if (zone > sc->reclaim_idx || skip_cma(folio_page(folio), sc)) {
-		gen = folio_inc_gen(lruvec, folio, false);
+		gen = folio_inc_gen(lruvec, folio);
 		list_move_tail(&folio->lru, &lrugen->lists[gen][type][zone]);
 		return true;
 	}
@@ -5144,16 +5136,16 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 static int get_tier_idx(struct lruvec *lruvec, int type)
 {
 	int tier;
-	struct ctrl_pos sp, pv;
+	struct ctrl_pos sp, pv = {};
 
 	/*
 	 * To leave a margin for fluctuations, use a larger gain factor (1:2).
 	 * This value is chosen because any other tier would have at least twice
 	 * as many refaults as the first tier.
 	 */
-	read_ctrl_pos(lruvec, type, 0, 1, &sp);
 	for (tier = 1; tier < MAX_NR_TIERS; tier++) {
-		read_ctrl_pos(lruvec, type, tier, 2, &pv);
+		read_ctrl_pos(lruvec, type, 0, tier, 1, &sp);
+		read_ctrl_pos(lruvec, type, tier, tier + 1, 2, &pv);
 		if (!positive_ctrl_err(&sp, &pv))
 			break;
 	}
