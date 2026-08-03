@@ -307,15 +307,23 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
 
 	atomic_long_add(delta, &lrugen->refaulted[hist][type][tier]);
 
-	if (refs >= LRU_REFS_WORKINGSET && lru_gen_in_fault()) {
-		folio_set_active(folio);
-		mod_lruvec_state(lruvec, WORKINGSET_ACTIVATE_BASE + type, delta);
+	/*
+	 * Activate a fault-driven refault: the folio was accessed at
+	 * least once before eviction and would have been promoted had
+	 * it stayed in memory.
+	 */
+	if (refs >= LRU_REFS_REFERENCED) {
+		if (lru_gen_in_fault()) {
+			folio_set_active(folio);
+			mod_lruvec_state(lruvec, WORKINGSET_ACTIVATE_BASE + type, delta);
+		}
+		/* Cap restored refs to prevent stale high-tier carry-over */
+		folio_set_lru_refs(folio, min_t(unsigned int, refs, LRU_REFS_PROTECTED));
 	}
-	if (refs) {
-		folio_set_lru_refs(folio, refs);
-		if (refs >= LRU_REFS_WORKINGSET)
-			mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
-	}
+
+	/* WORKINGSET_RESTORE tracks genuine workingset-level refaults */
+	if (refs >= LRU_REFS_WORKINGSET)
+		mod_lruvec_state(lruvec, WORKINGSET_RESTORE_BASE + type, delta);
 unlock:
 	rcu_read_unlock();
 }
