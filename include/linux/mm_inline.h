@@ -94,6 +94,124 @@ static __always_inline enum lru_list folio_lru_list(const struct folio *folio)
 	return lru;
 }
 
+/**
+ * lru_gen_from_flags - Return the LRU generation number from folio flags.
+ * @flags: folio flags
+ *
+ * Returns: A number between 0 and LRU_GEN_MAX, inclusive. Returns -1 if the
+ * flags indicate the folio is off the list (e.g., isolated).
+ */
+static inline int lru_gen_from_flags(unsigned long flags)
+{
+	int gen = ((flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF);
+
+	gen -= 1;
+	VM_WARN_ON_ONCE(gen != -1 && gen > LRU_GEN_MAX);
+	return gen;
+}
+
+/**
+ * lru_gen_set_flags - Set the LRU generation number to specified folio flags.
+ * @flags: pointer to the folio flags
+ * @gen: generation number, between 0 and LRU_GEN_MAX, inclusive.
+ */
+static inline void lru_gen_set_flags(unsigned long *flags, int gen)
+{
+	VM_WARN_ON_ONCE(gen > LRU_GEN_MAX || gen < 0);
+	*flags &= ~LRU_GEN_MASK;
+	*flags |= (gen + 1UL) << LRU_GEN_PGOFF;
+}
+
+/**
+ * lru_refs_from_flags - Return LRU referenced / access count from folio flags.
+ * @flags: folio flags
+ */
+static inline int lru_refs_from_flags(unsigned long flags)
+{
+	int refs;
+	unsigned int mask = (flags & LRU_REFS_MASK) >> LRU_REFS_PGOFF;
+
+	/*
+	 * Return the total number of accesses. Also see the comment on
+	 * LRU_REFS_FLAGS.
+	 */
+	refs = mask & BIT(0);
+	refs |= (flags & BIT(PG_workingset)) ? BIT(1) : 0;
+	refs |= (mask >> 1) << 2;
+	return refs;
+}
+
+/**
+ * lru_refs_set_flags - Set the LRU referenced / access count to specified folio flags.
+ * @flags: pointer to the folio flags
+ * @refs: referenced / access count number, between 0 and LRU_REFS_MAX, inclusive.
+ */
+static inline void lru_refs_set_flags(unsigned long *flags, unsigned int refs)
+{
+	VM_WARN_ON_ONCE(refs > LRU_REFS_MAX);
+	BUILD_BUG_ON((LRU_REFS_MAX >> 1) > (BIT(LRU_REFS_WIDTH) - 1));
+	*flags &= ~LRU_REFS_FLAGS;
+	if (refs & BIT(1))
+		*flags |= BIT(PG_workingset);
+	*flags |= ((refs & BIT(0)) | ((refs >> 2) << 1)) << LRU_REFS_PGOFF;
+}
+
+static inline int folio_lru_refs(const struct folio *folio)
+{
+	return lru_refs_from_flags(READ_ONCE(*const_folio_flags(folio, 0)));
+}
+
+#ifdef CONFIG_LRU_GEN
+/**
+ * __folio_set_lru_refs - Set a folio's LRU refs.
+ * @folio: the folio
+ * @refs: the new referenced count (0 .. LRU_REFS_MAX)
+ * @gen: optional output, the folio's gen at update time, or -1 if off-list
+ *
+ * Atomically updates the folio's refs.  Does not update the active/inactive
+ * ABI counters, the caller is responsible for that. If @gen is NULL, the
+ * folio must be off the LRU list (e.g., isolated).
+ *
+ * Returns the old LRU refs number.
+ */
+static inline int __folio_set_lru_refs(struct folio *folio, unsigned int refs, int *gen)
+{
+	unsigned long new_flags, old_flags = READ_ONCE(*folio_flags(folio, 0));
+
+	do {
+		new_flags = old_flags;
+		if (gen)
+			*gen = lru_gen_from_flags(old_flags);
+		else
+			VM_WARN_ON_ONCE(lru_gen_from_flags(old_flags) != -1);
+		lru_refs_set_flags(&new_flags, refs);
+	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
+
+	return lru_refs_from_flags(old_flags);
+}
+
+int folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec);
+#else
+static inline int folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
+{
+	return 0;
+}
+#endif
+
+/**
+ * folio_migrate_refs - Copy LRU refs to the destination folio.
+ * @new: the destination folio
+ * @old: the source folio
+ *
+ * Both folios must be off-LRU.
+ */
+static inline void folio_migrate_refs(struct folio *new, const struct folio *old)
+{
+	VM_WARN_ON_ONCE_FOLIO(folio_test_lru(old), old);
+	VM_WARN_ON_ONCE_FOLIO(folio_test_lru(new), new);
+	__folio_set_lru_refs(new, folio_lru_refs(old), NULL);
+}
+
 #ifdef CONFIG_LRU_GEN
 
 static inline bool lru_gen_switching(void)
@@ -147,104 +265,6 @@ static inline bool lru_refs_is_active(unsigned int refs)
 	VM_WARN_ON_ONCE(refs > LRU_REFS_MAX);
 	return refs >= LRU_REFS_ACTIVATED;
 }
-
-/**
- * lru_gen_from_flags - Return the LRU generation number from folio flags.
- * @flags: folio flags
- *
- * Returns: A number between 0 and LRU_GEN_MAX, inclusive. Returns -1 if the
- * flags indicate the folio is off the list (e.g., isolated).
- */
-static inline int lru_gen_from_flags(unsigned long flags)
-{
-	int gen = ((flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF);
-
-	gen -= 1;
-	VM_WARN_ON_ONCE(gen != -1 && gen > LRU_GEN_MAX);
-	return gen;
-}
-
-/**
- * lru_gen_set_flags - Set the LRU generation number to specified folio flags.
- * @flags: pointer to the folio flags
- * @gen: generation number, between 0 and LRU_GEN_MAX, inclusive.
- */
-static inline void lru_gen_set_flags(unsigned long *flags, int gen)
-{
-	BUILD_BUG_ON((LRU_GEN_MAX + 1) != MAX_NR_GENS);
-	VM_WARN_ON_ONCE(gen > LRU_GEN_MAX || gen < 0);
-	*flags &= ~LRU_GEN_MASK;
-	*flags |= (gen + 1UL) << LRU_GEN_PGOFF;
-}
-
-/**
- * lru_refs_from_flags - Return LRU referenced / access count from folio flags.
- * @flags: folio flags
- */
-static inline int lru_refs_from_flags(unsigned long flags)
-{
-	int refs;
-	unsigned int mask = (flags & LRU_REFS_MASK) >> LRU_REFS_PGOFF;
-
-	/*
-	 * Return the total number of accesses. Also see the comment on
-	 * LRU_REFS_FLAGS.
-	 */
-	refs = mask & BIT(0);
-	refs |= (flags & BIT(PG_workingset)) ? BIT(1) : 0;
-	refs |= (mask >> 1) << 2;
-	return refs;
-}
-
-/**
- * lru_refs_set_flags - Set the LRU referenced / access count to specified folio flags.
- * @flags: pointer to the folio flags
- * @refs: referenced / access count number, between 0 and LRU_REFS_MAX, inclusive.
- */
-static inline void lru_refs_set_flags(unsigned long *flags, unsigned int refs)
-{
-	VM_WARN_ON_ONCE(refs > LRU_REFS_MAX);
-	BUILD_BUG_ON((LRU_REFS_MAX >> 1) > (BIT(LRU_REFS_WIDTH) - 1));
-	*flags &= ~LRU_REFS_FLAGS;
-	if (refs & BIT(1))
-		*flags |= BIT(PG_workingset);
-	*flags |= ((refs & BIT(0)) | ((refs >> 2) << 1)) << LRU_REFS_PGOFF;
-}
-
-static inline int folio_lru_refs(const struct folio *folio)
-{
-	return lru_refs_from_flags(READ_ONCE(*const_folio_flags(folio, 0)));
-}
-
-/**
- * __folio_set_lru_refs - Set a folio's LRU refs.
- * @folio: the folio
- * @refs: the new referenced count (0 .. LRU_REFS_MAX)
- * @gen: optional output, the folio's gen at update time, or -1 if off-list
- *
- * Atomically updates the folio's refs.  Does not update the active/inactive
- * ABI counters, the caller is responsible for that. If @gen is NULL, the
- * folio must be off the LRU list (e.g., isolated).
- *
- * Returns the old LRU refs number.
- */
-static inline int __folio_set_lru_refs(struct folio *folio, unsigned int refs, int *gen)
-{
-	unsigned long new_flags, old_flags = READ_ONCE(*folio_flags(folio, 0));
-
-	do {
-		new_flags = old_flags;
-		if (gen)
-			*gen = lru_gen_from_flags(old_flags);
-		else
-			VM_WARN_ON_ONCE(lru_gen_from_flags(old_flags) != -1);
-		lru_refs_set_flags(&new_flags, refs);
-	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
-
-	return lru_refs_from_flags(old_flags);
-}
-
-int folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec);
 
 static inline int folio_lru_gen(const struct folio *folio)
 {
@@ -329,6 +349,7 @@ static inline bool lru_gen_add_folio(struct lruvec *lruvec, struct folio *folio,
 	int zone = folio_zonenum(folio);
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 
+	BUILD_BUG_ON((LRU_GEN_MAX + 1) != MAX_NR_GENS);
 	VM_WARN_ON_ONCE_FOLIO(folio_lru_gen(folio) != -1, folio);
 
 	if (folio_test_unevictable(folio) || !lrugen->enabled)
@@ -381,20 +402,6 @@ static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio,
 	return true;
 }
 
-/**
- * folio_migrate_refs - Copy LRU refs to the destination folio.
- * @new: the destination folio
- * @old: the source folio
- *
- * Both folios must be off-LRU.
- */
-static inline void folio_migrate_refs(struct folio *new, const struct folio *old)
-{
-	VM_WARN_ON_ONCE_FOLIO(folio_lru_gen(old) >= 0, old);
-	VM_WARN_ON_ONCE_FOLIO(folio_lru_gen(new) >= 0, new);
-	__folio_set_lru_refs(new, folio_lru_refs(old), NULL);
-}
-
 #else /* !CONFIG_LRU_GEN */
 
 static inline bool lru_gen_enabled(void)
@@ -422,30 +429,11 @@ static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio,
 	return false;
 }
 
-static inline int folio_lru_refs(const struct folio *folio)
+static inline int folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
 {
 	return 0;
 }
 
-static inline int __folio_set_lru_refs(struct folio *folio, unsigned int refs, int *gen)
-{
-	return 0;
-}
-
-static inline int folio_inc_lru_refs(struct folio *folio, bool promote, bool is_exec)
-{
-	return 0;
-}
-
-static inline void folio_migrate_refs(struct folio *new, const struct folio *old)
-{
-	VM_WARN_ON_ONCE_FOLIO(folio_test_lru(old), old);
-	VM_WARN_ON_ONCE_FOLIO(folio_test_lru(new), new);
-	if (folio_test_referenced(old))
-		folio_set_referenced(new);
-	if (folio_test_workingset(old))
-		folio_set_workingset(new);
-}
 #endif /* CONFIG_LRU_GEN */
 
 static __always_inline
