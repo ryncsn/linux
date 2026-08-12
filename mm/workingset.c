@@ -350,7 +350,7 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
 			mod_lruvec_state(lruvec, WORKINGSET_ACTIVATE_BASE + type, delta);
 		}
 		/* Cap restored refs to prevent stale high-tier carry-over */
-		folio_set_lru_refs(folio, min(refs, LRU_REFS_PROTECTED));
+		__folio_set_lru_refs(folio, min(refs, LRU_REFS_PROTECTED), NULL);
 	}
 
 	/* WORKINGSET_RESTORE tracks genuine workingset-level refaults */

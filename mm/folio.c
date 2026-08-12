@@ -353,18 +353,29 @@ static void __lru_cache_activate_folio(struct folio *folio)
 static bool lru_gen_clear_refs(struct folio *folio)
 {
 	int gen = folio_lru_gen(folio);
+	int zone = folio_zonenum(folio);
 	int type = folio_is_file_lru(folio);
+	int nr_pages = folio_nr_pages(folio);
+	enum lru_list lru = type * LRU_INACTIVE_FILE;
+	int old_refs;
 	unsigned long seq;
+	struct lruvec *lruvec;
 
 	if (gen < 0)
 		return true;
 
-	folio_set_lru_refs(folio, 0);
+	lruvec = folio_lruvec_live_get(folio);
+	old_refs = __folio_set_lru_refs(folio, 0, &gen);
 	folio_clear_referenced(folio);
 
-	rcu_read_lock();
-	seq = READ_ONCE(folio_lruvec(folio)->lrugen.min_seq[type]);
-	rcu_read_unlock();
+	/* Zeroing refs may demote active->inactive. */
+	if (gen >= 0 && lru_refs_is_active(old_refs)) {
+		__update_lru_size(lruvec, lru + LRU_ACTIVE, zone, -nr_pages);
+		__update_lru_size(lruvec, lru, zone, nr_pages);
+	}
+
+	seq = READ_ONCE(lruvec->lrugen.min_seq[type]);
+	folio_lruvec_live_put(lruvec);
 	/* whether can do without shuffling under the LRU lock */
 	return gen == lru_gen_from_seq(seq);
 }
