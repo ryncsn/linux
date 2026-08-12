@@ -888,13 +888,8 @@ int folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
 		gen = old_gen;
 		if (old_gen < 0)
 			goto out;
-		/*
-		 * Try to find and lock the lruvec if folio is on-list. We are
-		 * supposed to do lazy promotion here so will be removed later,
-		 * for now we have to block concurrent MGLRU aging.
-		 */
 		if (!lruvec) {
-			lruvec = lruvec_live_lock_irq(folio_lruvec(folio));
+			lruvec = folio_lruvec_live_get(folio);
 			lrugen = &lruvec->lrugen;
 		}
 		max_seq = READ_ONCE(lrugen->max_seq);
@@ -929,8 +924,16 @@ out:
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
 	if (gen >= 0) {
-		if (gen != old_gen)
+		if (gen != old_gen) {
+			/*
+			 * max_seq may have advanced past the promoted gen,
+			 * turning the promotion into a demotion. Activate
+			 * the folio in that rare case.
+			 */
 			lru_gen_update_size(lruvec, folio, old_gen, gen, refs);
+			if (unlikely(READ_ONCE(lrugen->max_seq) - max_seq > MIN_NR_GENS))
+				folio_activate(folio);
+		}
 		if (lru_refs_is_active(old_refs) != lru_refs_is_active(refs)) {
 			enum lru_list lru = type * LRU_INACTIVE_FILE;
 
@@ -941,7 +944,7 @@ out:
 		}
 	}
 	if (lruvec)
-		lruvec_unlock_irq(lruvec);
+		folio_lruvec_live_put(lruvec);
 	return refs;
 }
 
