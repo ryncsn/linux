@@ -236,6 +236,21 @@ static inline bool lru_gen_enabled(void)
 }
 #endif
 
+/**
+ * folio_test_workingset - Test if a folio is in the workingset.
+ * @folio: The folio to test.
+ *
+ * A folio is considered workingset if its LRU access count is >= 2,
+ * i.e. it has been accessed at least twice.  Under the classical LRU
+ * the access count is not maintained, so test the PG_workingset bit.
+ *
+ * Return: true if the folio is workingset.
+ */
+static __always_inline bool folio_test_workingset(const struct folio *folio)
+{
+	return folio_lru_refs(folio) >= LRU_REFS_WORKINGSET;
+}
+
 static inline bool lru_gen_in_fault(void)
 {
 	return current->in_lru_fault;
@@ -432,6 +447,11 @@ static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio,
 static inline int folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
 {
 	return 0;
+}
+
+static inline bool folio_test_workingset(const struct folio *folio)
+{
+	return test_bit(PG_workingset, const_folio_flags(folio, FOLIO_HEAD_PAGE));
 }
 
 #endif /* CONFIG_LRU_GEN */
