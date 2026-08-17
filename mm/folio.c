@@ -359,7 +359,7 @@ static void __lru_cache_activate_folio(struct folio *folio)
  * * active,unreferenced	->	active,referenced
  *
  * When a newly allocated folio is not yet visible, so safe for non-atomic ops,
- * __folio_set_referenced() may be substituted for folio_mark_accessed().
+ * __folio_init_referenced() may be substituted for folio_mark_accessed().
  */
 void folio_mark_accessed(struct folio *folio)
 {
@@ -371,8 +371,8 @@ void folio_mark_accessed(struct folio *folio)
 		return;
 	}
 
-	if (!folio_test_referenced(folio)) {
-		folio_set_referenced(folio);
+	if (!folio_test_referenced_by_bit(folio)) {
+		folio_set_referenced_by_bit(folio);
 	} else if (folio_test_unevictable(folio)) {
 		/*
 		 * Unevictable pages are on the "LRU_UNEVICTABLE" list. But,
@@ -390,7 +390,7 @@ void folio_mark_accessed(struct folio *folio)
 			folio_activate(folio);
 		else
 			__lru_cache_activate_folio(folio);
-		folio_clear_referenced(folio);
+		folio_clear_referenced_by_bit(folio);
 		workingset_activation(folio);
 	}
 	if (folio_test_idle(folio))
@@ -470,7 +470,10 @@ static void lru_deactivate_file(struct lruvec *lruvec, struct folio *folio)
 
 	lruvec_del_folio(lruvec, folio);
 	folio_clear_active(folio);
-	folio_clear_referenced(folio);
+	if (lru_gen_enabled())
+		__folio_set_lru_refs(folio, 0);
+	else
+		folio_clear_referenced_by_bit(folio);
 
 	if (folio_test_writeback(folio) || folio_test_dirty(folio)) {
 		/*
@@ -506,7 +509,10 @@ static void lru_deactivate(struct lruvec *lruvec, struct folio *folio)
 
 	lruvec_del_folio(lruvec, folio);
 	folio_clear_active(folio);
-	folio_clear_referenced(folio);
+	if (lru_gen_enabled())
+		__folio_set_lru_refs(folio, 0);
+	else
+		folio_clear_referenced_by_bit(folio);
 	lruvec_add_folio(lruvec, folio);
 
 	__count_vm_events(PGDEACTIVATE, nr_pages);
@@ -526,7 +532,7 @@ static void lru_lazyfree(struct lruvec *lruvec, struct folio *folio)
 	if (lru_gen_enabled())
 		__folio_set_lru_refs(folio, 0);
 	else
-		folio_clear_referenced(folio);
+		folio_clear_referenced_by_bit(folio);
 	/*
 	 * Lazyfree folios are clean anonymous folios.  They have
 	 * the swapbacked flag cleared, to distinguish them from normal

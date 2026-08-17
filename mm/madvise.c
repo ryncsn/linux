@@ -374,7 +374,7 @@ static void madvise_cold_or_pageout_prep_folio(struct folio *folio)
 	 * no need to touch it here.
 	 */
 	if (!lru_gen_enabled()) {
-		folio_clear_referenced(folio);
+		folio_clear_referenced_by_bit(folio);
 		if (folio_test_active(folio))
 			folio_set_workingset(folio);
 	}

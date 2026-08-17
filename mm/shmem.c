@@ -30,6 +30,7 @@
 #include <linux/fileattr.h>
 #include <linux/filelock.h>
 #include <linux/mm.h>
+#include <linux/mm_inline.h>
 #include <linux/random.h>
 #include <linux/sched/signal.h>
 #include <linux/export.h>

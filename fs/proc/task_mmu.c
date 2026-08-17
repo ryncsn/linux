@@ -949,7 +949,7 @@ static bool smap_check_folio_referenced(struct folio *folio)
 	if (lru_gen_enabled())
 		return folio_lru_refs(folio);
 	else
-		return folio_test_referenced(folio);
+		return folio_test_referenced_by_bit(folio);
 }
 
 static void smap_clear_folio_referenced(struct folio *folio)
@@ -957,7 +957,7 @@ static void smap_clear_folio_referenced(struct folio *folio)
 	if (lru_gen_enabled())
 		folio_reset_lru_refs(folio);
 	else
-		folio_clear_referenced(folio);
+		folio_clear_referenced_by_bit(folio);
 }
 
 static void smaps_account(struct mem_size_stats *mss, struct page *page,

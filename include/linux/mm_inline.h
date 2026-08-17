@@ -188,6 +188,18 @@ static inline void __folio_set_lru_refs(struct folio *folio, unsigned int refs)
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 }
 
+/**
+ * __folio_init_referenced - Initialize a fresh folio as referenced.
+ * @folio: the folio
+ *
+ * The folio is fresh and not yet visible, so flag updates can be
+ * non-atomic.
+ */
+static inline void __folio_init_referenced(struct folio *folio)
+{
+	lru_refs_set_flags(folio_flags(folio, 0), LRU_REFS_REFERENCED);
+}
+
 #ifdef CONFIG_LRU_GEN
 void folio_inc_lru_refs(struct folio *folio, unsigned int flags);
 bool folio_reset_lru_refs(struct folio *folio);
@@ -276,6 +288,39 @@ static __always_inline void folio_set_workingset(struct folio *folio)
 			break;
 		new_flags = old_flags;
 		lru_refs_set_flags(&new_flags, LRU_REFS_WORKINGSET);
+	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
+}
+
+/**
+ * folio_test_referenced - Test if a folio has been referenced.
+ * @folio: the folio
+ *
+ * Return: true if the folio's LRU refs count reaches
+ * LRU_REFS_REFERENCED.
+ */
+static __always_inline bool folio_test_referenced(const struct folio *folio)
+{
+	return folio_lru_refs(folio) >= LRU_REFS_REFERENCED;
+}
+
+/**
+ * folio_set_referenced - Mark a folio as referenced.
+ * @folio: the folio
+ *
+ * Promote the folio's LRU refs count to LRU_REFS_REFERENCED if below it.
+ */
+static __always_inline void folio_set_referenced(struct folio *folio)
+{
+	unsigned long new_flags, old_flags;
+
+	BUILD_BUG_ON(LRU_REFS_REFERENCED >= LRU_REFS_ACTIVATED);
+
+	old_flags = READ_ONCE(*folio_flags(folio, 0));
+	do {
+		if (lru_refs_from_flags(old_flags) >= LRU_REFS_REFERENCED)
+			break;
+		new_flags = old_flags;
+		lru_refs_set_flags(&new_flags, LRU_REFS_REFERENCED);
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 }
 
@@ -479,7 +524,45 @@ static inline void folio_set_workingset(struct folio *folio)
 {
 	set_bit(PG_workingset, folio_flags(folio, FOLIO_HEAD_PAGE));
 }
+
+static inline bool folio_test_referenced(const struct folio *folio)
+{
+	return test_bit(PG_referenced, const_folio_flags(folio, FOLIO_HEAD_PAGE));
+}
+
+static inline void folio_set_referenced(struct folio *folio)
+{
+	set_bit(PG_referenced, folio_flags(folio, FOLIO_HEAD_PAGE));
+}
 #endif /* CONFIG_LRU_GEN */
+
+/*
+ * For the classical LRU only: under MGLRU these would misread or
+ * corrupt the folio refs count.
+ */
+static __always_inline bool folio_test_referenced_by_bit(const struct folio *folio)
+{
+	VM_WARN_ON_ONCE(lru_gen_enabled() && !lru_gen_switching());
+	return test_bit(PG_referenced, const_folio_flags(folio, FOLIO_HEAD_PAGE));
+}
+
+static __always_inline void folio_set_referenced_by_bit(struct folio *folio)
+{
+	VM_WARN_ON_ONCE(lru_gen_enabled() && !lru_gen_switching());
+	set_bit(PG_referenced, folio_flags(folio, FOLIO_HEAD_PAGE));
+}
+
+static __always_inline void folio_clear_referenced_by_bit(struct folio *folio)
+{
+	VM_WARN_ON_ONCE(lru_gen_enabled() && !lru_gen_switching());
+	clear_bit(PG_referenced, folio_flags(folio, FOLIO_HEAD_PAGE));
+}
+
+static __always_inline bool folio_test_clear_referenced_by_bit(struct folio *folio)
+{
+	VM_WARN_ON_ONCE(lru_gen_enabled() && !lru_gen_switching());
+	return test_and_clear_bit(PG_referenced, folio_flags(folio, FOLIO_HEAD_PAGE));
+}
 
 static __always_inline
 void lruvec_add_folio(struct lruvec *lruvec, struct folio *folio)
