@@ -554,8 +554,8 @@ enum {
  * stored in min_seq[] separately for anon and file types so that they can be
  * incremented independently. Ideally min_seq[] are kept in sync when both anon
  * and file types are evictable. However, to adapt to situations like extreme
- * swappiness, they are allowed to be out of sync by at most
- * MAX_NR_GENS-MIN_NR_GENS-1.
+ * swappiness, they are allowed to be out of sync; each type keeps at least
+ * MIN_NR_GENS generations, i.e., min_seq[] never advances into max_seq.
  *
  * The number of pages in each generation is eventually consistent and therefore
  * can be transiently negative when reset_batch_size() is pending.
