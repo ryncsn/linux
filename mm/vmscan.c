@@ -3143,7 +3143,11 @@ done:
 	return last;
 }
 
-static bool iterate_mm_list_nowalk(struct lruvec *lruvec, unsigned long seq)
+/*
+ * When the page table walker is not suitable or failed to start due to
+ * temporary limit (e.g. no memory), skip the mm walk for this generation.
+ */
+static bool lru_gen_skip_walk_mm(struct lruvec *lruvec, unsigned long seq)
 {
 	bool success = false;
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
@@ -4092,13 +4096,13 @@ static bool try_to_inc_max_seq(struct lruvec *lruvec, unsigned long seq,
 	 * is less efficient, but it avoids bursty page faults.
 	 */
 	if (!should_walk_mmu()) {
-		success = iterate_mm_list_nowalk(lruvec, seq);
+		success = lru_gen_skip_walk_mm(lruvec, seq);
 		goto done;
 	}
 
 	walk = set_mm_walk(NULL, true);
 	if (!walk) {
-		success = iterate_mm_list_nowalk(lruvec, seq);
+		success = lru_gen_skip_walk_mm(lruvec, seq);
 		goto done;
 	}
 
