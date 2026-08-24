@@ -3975,7 +3975,8 @@ static unsigned long lruvec_populated_min_seq(struct lruvec *lruvec, int type,
 	return max_seq;
 }
 
-static void try_to_inc_min_seq(struct lruvec *lruvec, int swappiness, bool protect)
+static void try_to_inc_min_seq(struct lruvec *lruvec, struct scan_control *sc,
+			       int swappiness)
 {
 	int type;
 	bool seq_inc_flag = false;
@@ -4000,8 +4001,13 @@ static void try_to_inc_min_seq(struct lruvec *lruvec, int swappiness, bool prote
 	if (!seq_inc_flag)
 		return;
 
-	/* see the comment on lru_gen_folio */
-	if (protect && swappiness && swappiness <= MAX_SWAPPINESS) {
+	/*
+	 * See the comment on lru_gen_folio, but lift the limitation when
+	 * under high pressure, because the gap limit of min_seq will cause
+	 * swappiness imbalance and limit reclaimer's ability to scan.
+	 */
+	if (sc->priority > AGING_HIGH_PRIORITY &&
+	    swappiness && swappiness <= MAX_SWAPPINESS) {
 		seq--;
 		if (min_seq[LRU_GEN_ANON] > seq && min_seq[LRU_GEN_FILE] < seq)
 			min_seq[LRU_GEN_ANON] = seq;
@@ -4937,7 +4943,7 @@ static int evict_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	lruvec_lock_irq(lruvec);
 
 	/* In case folio deletion left empty old gens, flush them */
-	try_to_inc_min_seq(lruvec, swappiness, sc->priority > AGING_PRIORITY);
+	try_to_inc_min_seq(lruvec, sc, swappiness);
 
 	tier = get_tier_idx(lruvec, type);
 	scanned = scan_folios(nr_to_scan, lruvec, sc,
@@ -4946,7 +4952,7 @@ static int evict_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 
 	/* Scanning may have emptied the oldest gen, flush it */
 	if (scanned)
-		try_to_inc_min_seq(lruvec, swappiness, sc->priority > AGING_PRIORITY);
+		try_to_inc_min_seq(lruvec, sc, swappiness);
 
 	lruvec_unlock_irq(lruvec);
 
@@ -5018,17 +5024,25 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 	int type;
 	DEFINE_MIN_SEQ(lruvec);
 
-	/* Better run aging, as all reclaimable types are not fully populated */
-	if (evictable_min_seq(min_seq, swappiness) + MIN_NR_GENS >= max_seq)
+	/* Has to do aging, eviction is not possible at this point */
+	if (evictable_min_seq(min_seq, swappiness) + MIN_NR_GENS > max_seq)
 		return true;
 
 	/* Try to avoid aging, do gentle reclaim at low priority */
+	if (sc->priority > AGING_PRIORITY)
+		return false;
+
+	/* Better run aging, as all reclaimable types are not fully populated */
+	if (evictable_min_seq(min_seq, swappiness) + MIN_NR_GENS == max_seq)
+		return true;
+
+	/* Don't do proactive aging unless reclaim pressure is high */
 	if (sc->priority > AGING_HIGH_PRIORITY)
 		return false;
 
 	/* Preferred type is unevictable, run aging to prevent OOM or imbalance */
 	type = nr_to_scan[LRU_GEN_FILE] >= nr_to_scan[LRU_GEN_ANON];
-	if (min_seq[type] + MIN_NR_GENS > max_seq)
+	if (min_seq[type] + MIN_NR_GENS >= max_seq)
 		return true;
 
 	return false;

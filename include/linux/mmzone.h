@@ -1398,7 +1398,7 @@ static inline bool zone_intersects(const struct zone *zone,
  * will be escalated after each failed scan. When that happens, age more
  * proactively to satisfy further scan.
  */
-#define AGING_PRIORITY (DEF_PRIORITY - 2)
+#define AGING_PRIORITY (DEF_PRIORITY - 1)
 #define AGING_HIGH_PRIORITY (DEF_PRIORITY / 2)
 
 /* Maximum number of zones on a zonelist */
