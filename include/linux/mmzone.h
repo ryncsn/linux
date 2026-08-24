@@ -1392,6 +1392,14 @@ static inline bool zone_intersects(const struct zone *zone,
  * queues ("queue_length >> 12") during an aging round.
  */
 #define DEF_PRIORITY 12
+/*
+ * MGLRU aggregates pages in gens, so it's possible that older gens of one type
+ * of pages are empty hence it can notsatisfy the scan or reclaim, and priority
+ * will be escalated after each failed scan. When that happens, age more
+ * proactively to satisfy further scan.
+ */
+#define AGING_PRIORITY (DEF_PRIORITY - 2)
+#define AGING_HIGH_PRIORITY (DEF_PRIORITY / 2)
 
 /* Maximum number of zones on a zonelist */
 #define MAX_ZONES_PER_ZONELIST (MAX_NUMNODES * MAX_NR_ZONES)

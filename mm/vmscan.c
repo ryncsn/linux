@@ -4937,7 +4937,7 @@ static int evict_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	lruvec_lock_irq(lruvec);
 
 	/* In case folio deletion left empty old gens, flush them */
-	try_to_inc_min_seq(lruvec, swappiness, sc->priority == DEF_PRIORITY);
+	try_to_inc_min_seq(lruvec, swappiness, sc->priority > AGING_PRIORITY);
 
 	tier = get_tier_idx(lruvec, type);
 	scanned = scan_folios(nr_to_scan, lruvec, sc,
@@ -4946,7 +4946,7 @@ static int evict_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 
 	/* Scanning may have emptied the oldest gen, flush it */
 	if (scanned)
-		try_to_inc_min_seq(lruvec, swappiness, sc->priority == DEF_PRIORITY);
+		try_to_inc_min_seq(lruvec, swappiness, sc->priority > AGING_PRIORITY);
 
 	lruvec_unlock_irq(lruvec);
 
@@ -5018,12 +5018,12 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 	int type;
 	DEFINE_MIN_SEQ(lruvec);
 
-	/* have to run aging, we are running out of gens */
+	/* Better run aging, as all reclaimable types are not fully populated */
 	if (evictable_min_seq(min_seq, swappiness) + MIN_NR_GENS > max_seq)
 		return true;
 
-	/* try to avoid aging, do gentle reclaim at the default priority */
-	if (sc->priority == DEF_PRIORITY)
+	/* Try to avoid aging, do gentle reclaim at low priority */
+	if (sc->priority > AGING_PRIORITY)
 		return false;
 
 	/* better to run aging as the preferred type is running out of gens */
