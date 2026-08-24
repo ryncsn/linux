@@ -3975,7 +3975,7 @@ static unsigned long lruvec_populated_min_seq(struct lruvec *lruvec, int type,
 	return max_seq;
 }
 
-static void try_to_inc_min_seq(struct lruvec *lruvec, int swappiness)
+static void try_to_inc_min_seq(struct lruvec *lruvec, int swappiness, bool protect)
 {
 	int type;
 	bool seq_inc_flag = false;
@@ -4001,7 +4001,7 @@ static void try_to_inc_min_seq(struct lruvec *lruvec, int swappiness)
 		return;
 
 	/* see the comment on lru_gen_folio */
-	if (swappiness && swappiness <= MAX_SWAPPINESS) {
+	if (protect && swappiness && swappiness <= MAX_SWAPPINESS) {
 		seq--;
 		if (min_seq[LRU_GEN_ANON] > seq && min_seq[LRU_GEN_FILE] < seq)
 			min_seq[LRU_GEN_ANON] = seq;
@@ -4756,8 +4756,11 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	VM_WARN_ON_ONCE(!list_empty(list));
 
 	/* Allow the reclaim of up to second newest gen, and skip empty gens */
-	gen = lru_gen_from_seq(lruvec_populated_min_seq(lruvec, type,
-							lrugen->max_seq - 1));
+	gen = lru_gen_from_seq(lrugen->min_seq[type]);
+	if (sc->priority < DEF_PRIORITY)
+		gen = lru_gen_from_seq(lruvec_populated_min_seq(lruvec, type,
+								lrugen->max_seq - 1));
+
 	for (i = MAX_NR_ZONES; i > 0; i--) {
 		LIST_HEAD(moved);
 		int skipped_zone = 0;
@@ -4934,7 +4937,7 @@ static int evict_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	lruvec_lock_irq(lruvec);
 
 	/* In case folio deletion left empty old gens, flush them */
-	try_to_inc_min_seq(lruvec, swappiness);
+	try_to_inc_min_seq(lruvec, swappiness, sc->priority == DEF_PRIORITY);
 
 	tier = get_tier_idx(lruvec, type);
 	scanned = scan_folios(nr_to_scan, lruvec, sc,
@@ -4943,7 +4946,7 @@ static int evict_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 
 	/* Scanning may have emptied the oldest gen, flush it */
 	if (scanned)
-		try_to_inc_min_seq(lruvec, swappiness);
+		try_to_inc_min_seq(lruvec, swappiness, sc->priority == DEF_PRIORITY);
 
 	lruvec_unlock_irq(lruvec);
 
@@ -5010,11 +5013,12 @@ retry:
 }
 
 static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
-			     struct scan_control *sc, int swappiness)
+		struct scan_control *sc, int swappiness, unsigned long nr_to_scan[])
 {
+	int type;
 	DEFINE_MIN_SEQ(lruvec);
 
-	/* have to run aging, since eviction is not possible anymore */
+	/* have to run aging, we are running out of gens */
 	if (evictable_min_seq(min_seq, swappiness) + MIN_NR_GENS > max_seq)
 		return true;
 
@@ -5022,7 +5026,11 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 	if (sc->priority == DEF_PRIORITY)
 		return false;
 
-	/* better to run aging even though eviction is still possible */
+	/* better to run aging as the preferred type is running out of gens */
+	// type = nr_to_scan[LRU_GEN_FILE] >= nr_to_scan[LRU_GEN_ANON];
+	// if (min_seq[type] + MIN_NR_GENS >= max_seq)
+	// 	return true;
+
 	return evictable_min_seq(min_seq, swappiness) + MIN_NR_GENS == max_seq;
 }
 
@@ -5135,7 +5143,7 @@ static bool try_to_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 			break;
 		}
 
-		if (should_run_aging(lruvec, max_seq, sc, swappiness)) {
+		if (should_run_aging(lruvec, max_seq, sc, swappiness, nr)) {
 			if (try_to_inc_max_seq(lruvec, max_seq, swappiness, false))
 				need_rotate = true;
 			should_age = true;
