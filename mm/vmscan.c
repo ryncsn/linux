@@ -5019,19 +5019,19 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 	DEFINE_MIN_SEQ(lruvec);
 
 	/* Better run aging, as all reclaimable types are not fully populated */
-	if (evictable_min_seq(min_seq, swappiness) + MIN_NR_GENS > max_seq)
+	if (evictable_min_seq(min_seq, swappiness) + MIN_NR_GENS >= max_seq)
 		return true;
 
 	/* Try to avoid aging, do gentle reclaim at low priority */
-	if (sc->priority > AGING_PRIORITY)
+	if (sc->priority > AGING_HIGH_PRIORITY)
 		return false;
 
-	/* better to run aging as the preferred type is running out of gens */
-	// type = nr_to_scan[LRU_GEN_FILE] >= nr_to_scan[LRU_GEN_ANON];
-	// if (min_seq[type] + MIN_NR_GENS >= max_seq)
-	// 	return true;
+	/* Preferred type is unevictable, run aging to prevent OOM or imbalance */
+	type = nr_to_scan[LRU_GEN_FILE] >= nr_to_scan[LRU_GEN_ANON];
+	if (min_seq[type] + MIN_NR_GENS > max_seq)
+		return true;
 
-	return evictable_min_seq(min_seq, swappiness) + MIN_NR_GENS == max_seq;
+	return false;
 }
 
 static void lru_gen_prepare_scan(struct lruvec *lruvec, struct scan_control *sc,
