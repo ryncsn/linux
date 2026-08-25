@@ -244,6 +244,41 @@ static inline bool lru_gen_enabled(void)
 }
 #endif
 
+/**
+ * folio_test_workingset - Test if a folio is in the workingset.
+ * @folio: the folio
+ *
+ * A folio is workingset when its LRU refs count reaches
+ * LRU_REFS_WORKINGSET.  Under the classical LRU the refs count never
+ * goes above it, so this is just testing the PG_workingset bit.
+ *
+ * Return: true if the folio is workingset.
+ */
+static __always_inline bool folio_test_workingset(const struct folio *folio)
+{
+	return folio_lru_refs(folio) >= LRU_REFS_WORKINGSET;
+}
+
+/**
+ * folio_set_workingset - Mark a folio as workingset.
+ * @folio: the folio
+ *
+ * Promote the folio's LRU refs count to LRU_REFS_WORKINGSET if below
+ * it.  Under the classical LRU the refs count never goes above it,
+ * so this is equivalent to setting the PG_workingset bit.
+ */
+static __always_inline void folio_set_workingset(struct folio *folio)
+{
+	unsigned long new_flags, old_flags = READ_ONCE(*folio_flags(folio, 0));
+
+	do {
+		if (lru_refs_from_flags(old_flags) >= LRU_REFS_WORKINGSET)
+			break;
+		new_flags = old_flags;
+		lru_refs_set_flags(&new_flags, LRU_REFS_WORKINGSET);
+	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
+}
+
 static inline bool lru_gen_in_fault(void)
 {
 	return current->in_lru_fault;
@@ -433,6 +468,16 @@ static inline bool lru_gen_add_folio(struct lruvec *lruvec, struct folio *folio,
 static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
 {
 	return false;
+}
+
+static inline bool folio_test_workingset(const struct folio *folio)
+{
+	return test_bit(PG_workingset, const_folio_flags(folio, FOLIO_HEAD_PAGE));
+}
+
+static inline void folio_set_workingset(struct folio *folio)
+{
+	set_bit(PG_workingset, folio_flags(folio, FOLIO_HEAD_PAGE));
 }
 #endif /* CONFIG_LRU_GEN */
 
