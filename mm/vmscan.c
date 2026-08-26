@@ -4766,7 +4766,11 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	 * Only consider folios in the eligible zones for the gen selection,
 	 * covering the same zone range as the scan loop below.
 	 */
-	seq = lrugen->max_seq;
+	if (sc->priority >= DEF_PRIORITY)
+		seq = lrugen->max_seq - MIN_NR_GENS;
+	else
+		seq = lrugen->max_seq;
+
 	seq = lruvec_populated_min_seq(lruvec, type, sc->reclaim_idx + 1, seq);
 	gen = lru_gen_from_seq(seq);
 	max_gen = lru_gen_from_seq(max_seq);
@@ -5098,7 +5102,7 @@ static long evict_folio_lists(unsigned long nr_to_scan[], struct lruvec *lruvec,
 			     struct scan_control *sc, int swappiness, unsigned long max_batch)
 {
 	int type, iter = ANON_AND_FILE;
-	unsigned long batch, scanned = 0;
+	unsigned long batch, scanned, total_scanned = 0;
 
 	/* Prefer the type with the larger budget first */
 	type = nr_to_scan[LRU_GEN_FILE] >= nr_to_scan[LRU_GEN_ANON];
@@ -5107,17 +5111,18 @@ static long evict_folio_lists(unsigned long nr_to_scan[], struct lruvec *lruvec,
 	 * Scan both type with given budget, break early if any progress is
 	 * made to have the caller check if reclaim is already satisfied.
 	 */
-	while (iter--) {
+	while (--iter) {
 		if (!nr_to_scan[type])
 			continue;
 		batch = min(nr_to_scan[type], max_batch);
 		scanned = evict_folios(batch, lruvec, sc, type, swappiness);
-		if (scanned)
-			break;
+
+		nr_to_scan[type] -= min(nr_to_scan[type], scanned);
+		total_scanned += scanned;
+		type = !type;
 	}
 
-	nr_to_scan[type] -= min(nr_to_scan[type], scanned);
-	return scanned;
+	return total_scanned;
 }
 
 /*
@@ -5161,7 +5166,7 @@ static bool try_to_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 			should_age = true;
 		}
 
-		if (!evict_folio_lists(nr, lruvec, sc, swappiness, MIN_LRU_BATCH))
+		if (!evict_folio_lists(nr, lruvec, sc, swappiness, SWAP_CLUSTER_MAX))
 			break;
 
 		if (should_abort_scan(lruvec, sc))
