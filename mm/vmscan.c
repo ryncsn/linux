@@ -4744,8 +4744,7 @@ static bool isolate_folio(struct lruvec *lruvec, struct folio *folio, struct sca
 
 static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 		       struct scan_control *sc, int type, int tier,
-		       struct list_head *list, int *isolatedp,
-		       bool *exhausted)
+		       struct list_head *list, int *isolatedp)
 {
 	enum node_stat_item item;
 	int zone_idx;
@@ -4758,7 +4757,6 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	unsigned long remaining = nr_to_scan;
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
-	bool early_stop = false;
 	DEFINE_MAX_SEQ(lruvec);
 
 	VM_WARN_ON_ONCE(nr_to_scan > MAX_LRU_BATCH);
@@ -4817,10 +4815,8 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 				skipped_zone += delta;
 			}
 
-			if (!--remaining || max(isolated, skipped_zone) >= MIN_LRU_BATCH) {
-				early_stop = true;
+			if (!--remaining || max(isolated, skipped_zone) >= MIN_LRU_BATCH)
 				break;
-			}
 		}
 
 		if (skipped_zone) {
@@ -4829,10 +4825,8 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 			skipped += skipped_zone;
 		}
 
-		if (!remaining || isolated >= MIN_LRU_BATCH) {
-			early_stop = true;
+		if (!remaining || isolated >= MIN_LRU_BATCH)
 			break;
-		}
 	}
 
 	item = PGSCAN_KSWAPD + reclaimer_offset(sc);
@@ -4843,13 +4837,6 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 				scanned, skipped, isolated,
 				type ? LRU_INACTIVE_FILE : LRU_INACTIVE_ANON);
 
-	/*
-	* If we didn't stop early, all reclaimable folios in the current
-	* generation have been scanned. We are exhausted if this is the last
-	* reclaimable generation.
-	*/
-	*exhausted = !early_stop &&
-		     lrugen->min_seq[type] + MIN_NR_GENS == lrugen->max_seq;
 	*isolatedp = isolated;
 	return scanned;
 }
@@ -4970,7 +4957,7 @@ static int evict_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	int tier, scanned, reclaimed;
 	int isolated = 0, nr_isolated = 0;
 	unsigned long total_reclaimed = 0;
-	bool skip_retry = false, exhausted;
+	bool skip_retry = false;
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 
@@ -4981,7 +4968,7 @@ static int evict_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 
 	tier = get_tier_idx(lruvec, type);
 	scanned = scan_folios(nr_to_scan, lruvec, sc,
-			      type, tier, &list, &isolated, &exhausted);
+			      type, tier, &list, &isolated);
 	nr_isolated = isolated;
 
 	/* Scanning may have emptied the oldest gen, flush it */
