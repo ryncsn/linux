@@ -4862,7 +4862,9 @@ static int get_tier_idx(struct lruvec *lruvec, int type)
  * cost of swap vs fs (Documentation/admin-guide/sysctl/vm.rst).
  *
  * With r_anon and r_file the refault rates, we have:
- * anon : file = swappiness / r_anon : (MAX_SWAPPINESS - swappiness) / r_file
+ *
+ *	anon : file = swappiness / r_anon :
+ *		      (MAX_SWAPPINESS - swappiness) / r_file
  *
  * On entry, nr[] holds the evictable size of each type, bounding the
  * scan budget handed back in nr[] on return.
@@ -4873,9 +4875,9 @@ static int get_tier_idx(struct lruvec *lruvec, int type)
 static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 		unsigned long total_scan, unsigned long nr[])
 {
-	u64 anon_fractor, file_fractor;
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
-	u64 refault_pm[ANON_AND_FILE], anon_result, file_result;
+	u64 refault_pm[ANON_AND_FILE], anon_factor, file_factor;
+	u64 anon_scan, file_scan;
 
 	if (swappiness <= MIN_SWAPPINESS) {
 		nr[LRU_GEN_ANON] = 0;
@@ -4891,51 +4893,46 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 
 	for (int type = LRU_GEN_ANON; type <= LRU_GEN_FILE; type++) {
 		int hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
-		/* Start with 1 to avoid divide by zero */
-		u64 refaulted = 1, evicted = 1;
+		/* Start with 1 or MIN_LRU_BATCH to avoid divide by zero */
+		u64 refaulted = 1, evicted = MIN_LRU_BATCH;
 
 		for (int tier = 0; tier < MAX_NR_TIERS; tier++) {
 			refaulted += READ_ONCE(lrugen->avg_refaulted[type][tier]) +
-				     atomic_long_read(&lrugen->refaulted[hist][type][tier]);
+				     atomic_long_read(&lrugen->refaulted[hist][type][tier]) / 2;
 			evicted += READ_ONCE(lrugen->avg_total[type][tier]) +
-				   READ_ONCE(lrugen->protected[hist][type][tier]) +
-				   atomic_long_read(&lrugen->evicted[hist][type][tier]);
+				   (READ_ONCE(lrugen->protected[hist][type][tier]) +
+				    atomic_long_read(&lrugen->evicted[hist][type][tier])) / 2;
 		}
 
-		/*
-		 * Scale by 1024, clamped at 1024 (100%), beyond which the type
-		 * is thrashing. The +bias limits the spread of the two rates to
-		 * 17x, so refaults cannot zero out a type's share.
-		 */
+		/* Scale refault rate to 1024 (basically permille), clamp to 100%. */
 		refault_pm[type] = min_t(u64, refaulted * 1024 / evicted, 1024);
 	}
 
 	/*
 	 * Cross-multiplying the ratio above gives:
 	 * anon_scan = total_scan * (swappiness * r_file) /
-	 *     ((MAX_SWAPPINESS - swappiness + 1) * r_anon + swappiness * r_file)
+	 *     ((MAX_SWAPPINESS - swappiness) * r_anon + swappiness * r_file)
 	 */
-	anon_fractor = (u64)swappiness * refault_pm[LRU_GEN_FILE];
-	file_fractor = (u64)(MAX_SWAPPINESS - swappiness + 1) * refault_pm[LRU_GEN_ANON];
+	anon_factor = (u64)swappiness * refault_pm[LRU_GEN_FILE];
+	file_factor = (u64)(MAX_SWAPPINESS - swappiness) * refault_pm[LRU_GEN_ANON];
 
-	/* Just calculate anon, file result is just the opposite of it */
-	anon_result = (u64)total_scan * anon_fractor / (anon_fractor + file_fractor);
-	file_result = (u64)total_scan - anon_result;
+	anon_scan = (u64)total_scan * anon_factor / (anon_factor + file_factor);
+	file_scan = (u64)total_scan - anon_scan;
 
 	/*
 	 * Bound each type by its evictable size; hand the share exceeding
 	 * one type's size over to the other.
 	 */
-	if (anon_result > nr[LRU_GEN_ANON]) {
-		file_result += (anon_result - nr[LRU_GEN_ANON]);
-		anon_result = nr[LRU_GEN_ANON];
+	if (anon_scan > nr[LRU_GEN_ANON]) {
+		file_scan += anon_scan - nr[LRU_GEN_ANON];
+		anon_scan = nr[LRU_GEN_ANON];
 	}
-	if (file_result > nr[LRU_GEN_FILE]) {
-		anon_result += (file_result - nr[LRU_GEN_FILE]);
-		file_result = nr[LRU_GEN_FILE];
+	if (file_scan > nr[LRU_GEN_FILE]) {
+		anon_scan += file_scan - nr[LRU_GEN_FILE];
+		file_scan = nr[LRU_GEN_FILE];
 	}
-	nr[LRU_GEN_ANON] = min_t(u64, anon_result, nr[LRU_GEN_ANON]);
-	nr[LRU_GEN_FILE] = min_t(u64, file_result, nr[LRU_GEN_FILE]);
+	nr[LRU_GEN_ANON] = min_t(u64, anon_scan, nr[LRU_GEN_ANON]);
+	nr[LRU_GEN_FILE] = min_t(u64, file_scan, nr[LRU_GEN_FILE]);
 }
 
 static int evict_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
@@ -5108,18 +5105,18 @@ static long evict_folio_lists(unsigned long nr_to_scan[], struct lruvec *lruvec,
 	type = nr_to_scan[LRU_GEN_FILE] >= nr_to_scan[LRU_GEN_ANON];
 
 	/*
-	 * Scan both type with given budget, break early if any progress is
-	 * made to have the caller check if reclaim is already satisfied.
+	 * Scan both types with the given budgets; the caller checks if
+	 * reclaim is satisfied after each pass.
 	 */
-	while (--iter) {
+	for (iter = ANON_AND_FILE; iter--; type = !type) {
 		if (!nr_to_scan[type])
 			continue;
+
 		batch = min(nr_to_scan[type], max_batch);
 		scanned = evict_folios(batch, lruvec, sc, type, swappiness);
 
 		nr_to_scan[type] -= min(nr_to_scan[type], scanned);
 		total_scanned += scanned;
-		type = !type;
 	}
 
 	return total_scanned;
