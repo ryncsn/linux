@@ -4767,7 +4767,7 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	 * covering the same zone range as the scan loop below.
 	 */
 	if (sc->priority >= DEF_PRIORITY)
-		seq = lrugen->max_seq - MIN_NR_GENS;
+		seq = lrugen->max_seq - 1;
 	else
 		seq = lrugen->max_seq;
 
