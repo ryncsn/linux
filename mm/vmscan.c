@@ -4763,19 +4763,10 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	VM_WARN_ON_ONCE(!list_empty(list));
 
 	/*
-	 * Respect the gen hotness distribution at low priority to avoid
-	 * aging and scan cost, but prefer to satisfy the reclaimers request
-	 * when under pressure to respect swappiness more and reduce IO cost.
-	 */
-	if (sc->priority == DEF_PRIORITY)
-		seq = lrugen->min_seq[type];
-	else
-		seq = lrugen->max_seq;
-
-	/*
 	 * Only consider folios in the eligible zones for the gen selection,
 	 * covering the same zone range as the scan loop below.
 	 */
+	seq = lrugen->max_seq;
 	seq = lruvec_populated_min_seq(lruvec, type, sc->reclaim_idx + 1, seq);
 	gen = lru_gen_from_seq(seq);
 	max_gen = lru_gen_from_seq(max_seq);
@@ -4897,8 +4888,7 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 	for (int type = LRU_GEN_ANON; type <= LRU_GEN_FILE; type++) {
 		int hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
 		/* Start with 1 to avoid divide by zero */
-		u64 refaulted = 0, evicted = 1;
-		const u64 bias = MIN_LRU_BATCH / 2;
+		u64 refaulted = 1, evicted = 1;
 
 		for (int tier = 0; tier < MAX_NR_TIERS; tier++) {
 			refaulted += READ_ONCE(lrugen->avg_refaulted[type][tier]) +
@@ -4913,7 +4903,7 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 		 * is thrashing. The +bias limits the spread of the two rates to
 		 * 17x, so refaults cannot zero out a type's share.
 		 */
-		refault_pm[type] = min_t(u64, refaulted * 1024 / evicted, 1024) + bias;
+		refault_pm[type] = min_t(u64, refaulted * 1024 / evicted, 1024);
 	}
 
 	/*
