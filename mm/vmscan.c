@@ -4907,18 +4907,21 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 
 		for (int tier = 0; tier < MAX_NR_TIERS; tier++) {
 			refaulted += READ_ONCE(lrugen->avg_refaulted[type][tier]) +
-				     atomic_long_read(&lrugen->refaulted[hist][type][tier]) / 2;
+				     atomic_long_read(&lrugen->refaulted[hist][type][tier]);
 			evicted += READ_ONCE(lrugen->avg_total[type][tier]) +
 				   (READ_ONCE(lrugen->protected[hist][type][tier]) +
 				    atomic_long_read(&lrugen->evicted[hist][type][tier])) / 2;
 		}
 
 		/*
-		 * The refault rate scaled to 1024 (100%), clamped, and raised
-		 * to the squre power of two to respect the refault rate more.
+		 * The refault rate scaled to 1024 (100%), clamped, biased by
+		 * MIN_LRU_BATCH, and raised to the fourth power to approximate
+		 * the hard switch of the old type selection: a type refaulting
+		 * moderately more than the other quickly loses most of its
+		 * share, while a cheap type keeps almost all of it.
 		 */
-		refault_pm[type] = min_t(u64, refaulted * 1024 / evicted, 1024);
-		refault_pm[type] = max(refault_pm[type] * refault_pm[type] / 1024, 1);
+		refault_pm[type] = min_t(u64, refaulted * 1024 / evicted, 1024) + MIN_LRU_BATCH;
+		refault_pm[type] = refault_pm[type] * refault_pm[type] / 1024;
 		refault_pm[type] = max(refault_pm[type] * refault_pm[type] / 1024, 1);
 	}
 
@@ -5113,7 +5116,7 @@ static long evict_folio_lists(unsigned long nr_to_scan[], struct lruvec *lruvec,
 			     struct scan_control *sc, int swappiness, unsigned long max_batch)
 {
 	int type, iter = ANON_AND_FILE;
-	unsigned long batch, scanned, remainder = 0, total_scanned = 0;
+	unsigned long batch, scanned, total_scanned = 0;
 
 	/* Prefer the type with the larger budget first */
 	type = nr_to_scan[LRU_GEN_FILE] >= nr_to_scan[LRU_GEN_ANON];
@@ -5126,14 +5129,11 @@ static long evict_folio_lists(unsigned long nr_to_scan[], struct lruvec *lruvec,
 		if (!nr_to_scan[type])
 			continue;
 
-		batch = min(nr_to_scan[type], max_batch) + remainder;
+		batch = min(nr_to_scan[type], max_batch);
 		scanned = evict_folios(batch, lruvec, sc, type, swappiness);
 
 		nr_to_scan[type] -= min(nr_to_scan[type], scanned);
 		total_scanned += scanned;
-
-		if (scanned < batch)
-			remainder = batch - scanned;
 	}
 
 	return total_scanned;
@@ -5180,7 +5180,7 @@ static bool try_to_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 			should_age = true;
 		}
 
-		if (!evict_folio_lists(nr, lruvec, sc, swappiness, MIN_LRU_BATCH))
+		if (!evict_folio_lists(nr, lruvec, sc, swappiness, SWAP_CLUSTER_MAX))
 			break;
 
 		if (should_abort_scan(lruvec, sc))
