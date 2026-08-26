@@ -4765,8 +4765,14 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	/*
 	 * Only consider folios in the eligible zones for the gen selection,
 	 * covering the same zone range as the scan loop below.
+	 *
+	 * Respect hotness at default priority, and only reach into the
+	 * newest generation when under severe pressure, so hot folios are
+	 * not evicted as soon as priority is raised.
 	 */
-	if (sc->priority >= DEF_PRIORITY)
+	if (sc->priority == DEF_PRIORITY)
+		seq = lrugen->max_seq - MIN_NR_GENS;
+	else if (sc->priority > DEF_PRIORITY / 2)
 		seq = lrugen->max_seq - 1;
 	else
 		seq = lrugen->max_seq;
@@ -4866,6 +4872,9 @@ static int get_tier_idx(struct lruvec *lruvec, int type)
  *	anon : file = swappiness / r_anon :
  *		      (MAX_SWAPPINESS - swappiness) / r_file
  *
+ * The rates are raised to the fourth power so the split reacts sharply
+ * to refault differences, like the hard switch of the old selector.
+ *
  * On entry, nr[] holds the evictable size of each type, bounding the
  * scan budget handed back in nr[] on return.
  *
@@ -4904,8 +4913,13 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 				    atomic_long_read(&lrugen->evicted[hist][type][tier])) / 2;
 		}
 
-		/* Scale refault rate to 1024 (basically permille), clamp to 100%. */
+		/*
+		 * The refault rate scaled to 1024 (100%), clamped, and raised
+		 * to the squre power of two to respect the refault rate more.
+		 */
 		refault_pm[type] = min_t(u64, refaulted * 1024 / evicted, 1024);
+		refault_pm[type] = max(refault_pm[type] * refault_pm[type] / 1024, 1);
+		refault_pm[type] = max(refault_pm[type] * refault_pm[type] / 1024, 1);
 	}
 
 	/*
@@ -5099,7 +5113,7 @@ static long evict_folio_lists(unsigned long nr_to_scan[], struct lruvec *lruvec,
 			     struct scan_control *sc, int swappiness, unsigned long max_batch)
 {
 	int type, iter = ANON_AND_FILE;
-	unsigned long batch, scanned, total_scanned = 0;
+	unsigned long batch, scanned, remainder = 0, total_scanned = 0;
 
 	/* Prefer the type with the larger budget first */
 	type = nr_to_scan[LRU_GEN_FILE] >= nr_to_scan[LRU_GEN_ANON];
@@ -5112,11 +5126,14 @@ static long evict_folio_lists(unsigned long nr_to_scan[], struct lruvec *lruvec,
 		if (!nr_to_scan[type])
 			continue;
 
-		batch = min(nr_to_scan[type], max_batch);
+		batch = min(nr_to_scan[type], max_batch) + remainder;
 		scanned = evict_folios(batch, lruvec, sc, type, swappiness);
 
 		nr_to_scan[type] -= min(nr_to_scan[type], scanned);
 		total_scanned += scanned;
+
+		if (scanned < batch)
+			remainder = batch - scanned;
 	}
 
 	return total_scanned;
@@ -5163,7 +5180,7 @@ static bool try_to_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 			should_age = true;
 		}
 
-		if (!evict_folio_lists(nr, lruvec, sc, swappiness, SWAP_CLUSTER_MAX))
+		if (!evict_folio_lists(nr, lruvec, sc, swappiness, MIN_LRU_BATCH))
 			break;
 
 		if (should_abort_scan(lruvec, sc))
