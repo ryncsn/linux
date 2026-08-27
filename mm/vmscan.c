@@ -4903,14 +4903,14 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 	for (int type = LRU_GEN_ANON; type <= LRU_GEN_FILE; type++) {
 		int hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
 		/* Start with 1 or MIN_LRU_BATCH to avoid divide by zero */
-		u64 refaulted = 1, evicted = MIN_LRU_BATCH;
+		u64 refaulted = MIN_LRU_BATCH, evicted = MIN_LRU_BATCH;
 
 		for (int tier = 0; tier < MAX_NR_TIERS; tier++) {
 			refaulted += READ_ONCE(lrugen->avg_refaulted[type][tier]) +
 				     atomic_long_read(&lrugen->refaulted[hist][type][tier]);
 			evicted += READ_ONCE(lrugen->avg_total[type][tier]) +
 				   (READ_ONCE(lrugen->protected[hist][type][tier]) +
-				    atomic_long_read(&lrugen->evicted[hist][type][tier])) / 2;
+				    atomic_long_read(&lrugen->evicted[hist][type][tier]));
 		}
 
 		/*
@@ -4920,8 +4920,7 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 		 * moderately more than the other quickly loses most of its
 		 * share, while a cheap type keeps almost all of it.
 		 */
-		refault_pm[type] = min_t(u64, refaulted * 1024 / evicted, 1024) + MIN_LRU_BATCH;
-		refault_pm[type] = refault_pm[type] * refault_pm[type] / 1024;
+		refault_pm[type] = min_t(u64, refaulted * 1024 / evicted, 1024);
 		refault_pm[type] = max(refault_pm[type] * refault_pm[type] / 1024, 1);
 	}
 
@@ -5115,17 +5114,14 @@ static bool should_abort_scan(struct lruvec *lruvec, struct scan_control *sc)
 static long evict_folio_lists(unsigned long nr_to_scan[], struct lruvec *lruvec,
 			     struct scan_control *sc, int swappiness, unsigned long max_batch)
 {
-	int type, iter = ANON_AND_FILE;
+	int type;
 	unsigned long batch, scanned, total_scanned = 0;
-
-	/* Prefer the type with the larger budget first */
-	type = nr_to_scan[LRU_GEN_FILE] >= nr_to_scan[LRU_GEN_ANON];
 
 	/*
 	 * Scan both types with the given budgets; the caller checks if
 	 * reclaim is satisfied after each pass.
 	 */
-	for (iter = ANON_AND_FILE; iter--; type = !type) {
+	for (type = LRU_GEN_FILE; type >= LRU_GEN_ANON; type--) {
 		if (!nr_to_scan[type])
 			continue;
 
