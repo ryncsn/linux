@@ -5866,6 +5866,7 @@ static ssize_t lru_gen_seq_write(struct file *file, const char __user *src,
 		.may_swap = true,
 		.reclaim_idx = MAX_NR_ZONES - 1,
 		.gfp_mask = GFP_KERNEL,
+		.priority = DEF_PRIORITY,
 		.proactive = true,
 	};
 
