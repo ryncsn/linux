@@ -4869,13 +4869,16 @@ static int get_tier_idx(struct lruvec *lruvec, int type)
  * Otherwise, with r_anon and r_file the per-type refault rates, scaled
  * to 4096 (100%) and floored at 1, the split is:
  *
- *	anon : file = swappiness * r_file * nr[ANON] :
- *		      (MAX_SWAPPINESS - swappiness) * r_anon * nr[FILE]
+ *	anon : file = swappiness * r_file * (total + nr[ANON]) :
+ *		      (MAX_SWAPPINESS - swappiness) * r_anon * (total + nr[FILE])
  *
- * Weighting by the evictable size throttles the type with less
- * content. On entry, nr[] holds the evictable size of each type,
- * bounding the scan budget handed back in nr[] on return; a share
- * exceeding one type's size is handed over to the other.
+ * Damping the size weighting like calculate_pressure_balance() damps
+ * its costs (at least a third of the pressure applies before the
+ * sizes kick in) caps the size ratio at 2x, so swappiness stays
+ * effective while the type with less content is still throttled. On
+ * entry, nr[] holds the evictable size of each type, bounding the
+ * scan budget handed back in nr[] on return; a share exceeding one
+ * type's size is handed over to the other.
  *
  * The counters are read without the LRU lock, as a stale snapshot merely
  * skews the split for one pass.
@@ -4942,14 +4945,19 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 	}
 
 	/*
-	 * anon : file = swappiness * r_file * nr[ANON] :
-	 *               (MAX_SWAPPINESS - swappiness) * r_anon * nr[FILE]
+	 * anon : file = swappiness * r_file * (total + nr[ANON]) :
+	 *               (MAX_SWAPPINESS - swappiness) * r_anon * (total + nr[FILE])
 	 *
-	 * Folded into one 128-bit division, so neither term truncates and
-	 * the denominator is nonzero whenever nr[] is nonempty.
+	 * Damping the sizes like calculate_pressure_balance() damps its
+	 * costs (at least a third of the pressure applies before the
+	 * sizes kick in) caps the size ratio at 2x, so a type holding
+	 * most of the pages cannot drown out swappiness, while the rates
+	 * stay undamped and can still push back against a thrashing type.
+	 * Folded into one 128-bit division, so nothing truncates and the
+	 * denominator is nonzero whenever nr[] is nonempty.
 	 */
-	anon_factor = (u64)swappiness * refault_pm[LRU_GEN_FILE] * nr[LRU_GEN_ANON];
-	file_factor = (u64)(MAX_SWAPPINESS - swappiness) * refault_pm[LRU_GEN_ANON] * nr[LRU_GEN_FILE];
+	anon_factor = (u64)swappiness * refault_pm[LRU_GEN_FILE] * (total + nr[LRU_GEN_ANON]);
+	file_factor = (u64)(MAX_SWAPPINESS - swappiness) * refault_pm[LRU_GEN_ANON] * (total + nr[LRU_GEN_FILE]);
 
 	anon_scan = mul_u64_u64_div_u64(total_scan, anon_factor, anon_factor + file_factor);
 	file_scan = (u64)total_scan - anon_scan;
