@@ -4884,8 +4884,9 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 {
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 	u64 refault_pm[ANON_AND_FILE], anon_factor, file_factor;
-	u64 anon_scan, file_scan;
+	u64 anon_scan, file_scan, total;
 
+	total = nr[LRU_GEN_ANON] + nr[LRU_GEN_FILE];
 	if (swappiness <= MIN_SWAPPINESS) {
 		nr[LRU_GEN_ANON] = 0;
 		nr[LRU_GEN_FILE] = min_t(u64, total_scan, nr[LRU_GEN_FILE]);
@@ -4900,15 +4901,14 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 
 	for (int type = LRU_GEN_ANON; type <= LRU_GEN_FILE; type++) {
 		int hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
-		/* Start with 1 or MIN_LRU_BATCH to avoid divide by zero */
-		u64 refaulted = MIN_LRU_BATCH, total = MIN_LRU_BATCH;
-		u64 bias = MIN_LRU_BATCH;
+		/* Start with MIN_LRU_BATCH to avoid over react on small values */
+		u64 refaulted = MIN_LRU_BATCH, evicted = MIN_LRU_BATCH;
 
 		/*
 		 * Lockless monolith read is fine for MGLRU because, if the type
 		 * isn thrashing or having a lot of refault, aging is triggered
 		 * and the statistic gets averaged for every aging. If it's not
-		 * aging, we reads the accumulated total value, leading to a small
+		 * aging, we reads the accumulated evicted value, leading to a small
 		 * refault rate as expected.
 		 *
 		 * If aging is blocked due to unfair type hotness, reclaim will
@@ -4919,20 +4919,20 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 			refaulted += READ_ONCE(lrugen->avg_refaulted[type][tier]);
 			refaulted += atomic_long_read(&lrugen->refaulted[hist][type][tier]);
 
-			total += READ_ONCE(lrugen->avg_total[type][tier]);
-			total += atomic_long_read(&lrugen->evicted[hist][type][tier]);
+			evicted += READ_ONCE(lrugen->avg_total[type][tier]);
+			evicted += READ_ONCE(lrugen->protected[hist][type][tier]);
+			evicted += atomic_long_read(&lrugen->evicted[hist][type][tier]);
 		}
-		total += nr[type];
 
 		/*
-		 * The refault rate scaled to 1024 (100%), clamped, biased by
+		 * The refault rate scaled to 4096 (100%), clamped, biased by
 		 * MIN_LRU_BATCH to prevent divide by zero and over react,
 		 * and raised to the fourth power to approximate
 		 * the hard switch of the old type selection: a type refaulting
 		 * moderately more than the other quickly loses most of its
 		 * share, while a cheap type keeps almost all of it.
 		 */
-		refault_pm[type] = min_t(u64, refaulted * 1024 / total, 1024) + bias;
+		refault_pm[type] = min_t(u64, refaulted * 4096 / evicted, 4096);
 	}
 
 	/*
@@ -4943,7 +4943,10 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 	anon_factor = (u64)swappiness * refault_pm[LRU_GEN_FILE];
 	file_factor = (u64)(MAX_SWAPPINESS - swappiness) * refault_pm[LRU_GEN_ANON];
 
-	anon_scan = (u64)total_scan * anon_factor / (anon_factor + file_factor);
+	anon_factor = anon_factor * nr[LRU_GEN_ANON] / total;
+	file_factor = file_factor * nr[LRU_GEN_FILE] / total;
+
+	anon_scan = (u64)total_scan * anon_factor / (anon_factor + file_factor + 1);
 	file_scan = (u64)total_scan - anon_scan;
 
 	/*
