@@ -4770,10 +4770,8 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	 * newest generation when under severe pressure, so hot folios are
 	 * not evicted as soon as priority is raised.
 	 */
-	if (sc->priority == DEF_PRIORITY)
+	if (sc->priority > DEF_PRIORITY - 2)
 		seq = lrugen->max_seq - MIN_NR_GENS;
-	else if (sc->priority > DEF_PRIORITY / 2)
-		seq = lrugen->max_seq - 1;
 	else
 		seq = lrugen->max_seq;
 
@@ -4909,8 +4907,7 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 			refaulted += READ_ONCE(lrugen->avg_refaulted[type][tier]) +
 				     atomic_long_read(&lrugen->refaulted[hist][type][tier]);
 			evicted += READ_ONCE(lrugen->avg_total[type][tier]) +
-				   (READ_ONCE(lrugen->protected[hist][type][tier]) +
-				    atomic_long_read(&lrugen->evicted[hist][type][tier]));
+				   atomic_long_read(&lrugen->evicted[hist][type][tier]);
 		}
 
 		/*
@@ -4921,6 +4918,7 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 		 * share, while a cheap type keeps almost all of it.
 		 */
 		refault_pm[type] = min_t(u64, refaulted * 1024 / evicted, 1024);
+		refault_pm[type] = max(refault_pm[type] * refault_pm[type] / 1024, 1);
 		refault_pm[type] = max(refault_pm[type] * refault_pm[type] / 1024, 1);
 	}
 
