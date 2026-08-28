@@ -4869,14 +4869,16 @@ static int get_tier_idx(struct lruvec *lruvec, int type)
  * Otherwise, with r_anon and r_file the per-type refault rates, scaled
  * to 4096 (100%) and floored at 1, the split is:
  *
- *	anon : file = swappiness * r_file * (total + nr[ANON]) :
- *		      (MAX_SWAPPINESS - swappiness) * r_anon * (total + nr[FILE])
+ *	anon : file = swappiness * r_file * (nr[ANON] + nr[FILE] / d) :
+ *		      (MAX_SWAPPINESS - swappiness) * r_anon * (nr[FILE] + nr[ANON] / d)
  *
- * Damping the size weighting like calculate_pressure_balance() damps
- * its costs (at least a third of the pressure applies before the
- * sizes kick in) caps the size ratio at 2x, so swappiness stays
- * effective while the type with less content is still throttled. On
- * entry, nr[] holds the evictable size of each type, bounding the
+ * where d = min(swappiness, MAX_SWAPPINESS - swappiness). The size
+ * weighting throttles the type with less content, but it yields to
+ * the IO cost signal near either extreme: at swappiness 1 or 199 it
+ * is the classic damped shape, so the 199:1 cost ratio drives the
+ * split and either type can go extreme; in the middle it is linear
+ * in size, so a scarce type's reclaim scales down with its content.
+ * On entry, nr[] holds the evictable size of each type, bounding the
  * scan budget handed back in nr[] on return; a share exceeding one
  * type's size is handed over to the other.
  *
@@ -4889,6 +4891,8 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 	u64 refault_pm[ANON_AND_FILE], anon_factor, file_factor;
 	u64 anon_scan, file_scan, total;
+	u64 anon_weight, file_weight;
+	int bias;
 
 	total = nr[LRU_GEN_ANON] + nr[LRU_GEN_FILE];
 
@@ -4945,19 +4949,22 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 	}
 
 	/*
-	 * anon : file = swappiness * r_file * (total + nr[ANON]) :
-	 *               (MAX_SWAPPINESS - swappiness) * r_anon * (total + nr[FILE])
+	 * The size weighting throttles the type with less content, but it
+	 * yields to the IO cost signal near either extreme: at swappiness
+	 * 1 or 199 it becomes the classic damped shape and the 199:1 cost
+	 * ratio drives the split, so either type can go extreme; in the
+	 * middle it is linear in size, so a scarce type's reclaim scales
+	 * down with its content.
 	 *
-	 * Damping the sizes like calculate_pressure_balance() damps its
-	 * costs (at least a third of the pressure applies before the
-	 * sizes kick in) caps the size ratio at 2x, so a type holding
-	 * most of the pages cannot drown out swappiness, while the rates
-	 * stay undamped and can still push back against a thrashing type.
 	 * Folded into one 128-bit division, so nothing truncates and the
 	 * denominator is nonzero whenever nr[] is nonempty.
 	 */
-	anon_factor = (u64)swappiness * refault_pm[LRU_GEN_FILE] * (total + nr[LRU_GEN_ANON]);
-	file_factor = (u64)(MAX_SWAPPINESS - swappiness) * refault_pm[LRU_GEN_ANON] * (total + nr[LRU_GEN_FILE]);
+	bias = min(swappiness, MAX_SWAPPINESS - swappiness);
+	anon_weight = nr[LRU_GEN_ANON] + nr[LRU_GEN_FILE] / bias;
+	file_weight = nr[LRU_GEN_FILE] + nr[LRU_GEN_ANON] / bias;
+
+	anon_factor = (u64)swappiness * refault_pm[LRU_GEN_FILE] * anon_weight;
+	file_factor = (u64)(MAX_SWAPPINESS - swappiness) * refault_pm[LRU_GEN_ANON] * file_weight;
 
 	anon_scan = mul_u64_u64_div_u64(total_scan, anon_factor, anon_factor + file_factor);
 	file_scan = (u64)total_scan - anon_scan;
