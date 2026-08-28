@@ -4770,7 +4770,7 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	 * newest generation when under severe pressure, so hot folios are
 	 * not evicted as soon as priority is raised.
 	 */
-	if (sc->priority > DEF_PRIORITY - 2)
+	if (sc->priority == DEF_PRIORITY)
 		seq = lrugen->max_seq - MIN_NR_GENS;
 	else if (sc->priority > DEF_PRIORITY / 2)
 		seq = lrugen->max_seq - 1;
@@ -5012,8 +5012,7 @@ retry:
 		}
 
 		/* don't add rejected folios to the oldest generation */
-		if (lru_gen_folio_seq(lruvec, folio, false) == min_seq[type])
-			set_mask_bits(&folio->flags.f, LRU_REFS_FLAGS, BIT(PG_active));
+		set_mask_bits(&folio->flags.f, LRU_REFS_FLAGS, BIT(PG_active));
 	}
 
 	move_folios_to_lru(&list);
