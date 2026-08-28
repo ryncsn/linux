@@ -4865,16 +4865,17 @@ static int get_tier_idx(struct lruvec *lruvec, int type)
  * PID controller. Swappiness is the direct balance factor encoding the IO
  * cost of swap vs fs (Documentation/admin-guide/sysctl/vm.rst).
  *
- * With r_anon and r_file the per-type refault rates, scaled to 4096 (100%)
- * and floored at 1, the split is:
+ * Swappiness 0 scans file only and SWAPPINESS_ANON_ONLY scans anon only.
+ * Otherwise, with r_anon and r_file the per-type refault rates, scaled
+ * to 4096 (100%) and floored at 1, the split is:
  *
  *	anon : file = swappiness * r_file * nr[ANON] :
  *		      (MAX_SWAPPINESS - swappiness) * r_anon * nr[FILE]
  *
- * Weighting by the evictable size makes the split proportional to size
- * when the rates are equal. On entry, nr[] holds the evictable size of
- * each type, bounding the scan budget handed back in nr[] on return; a
- * share exceeding one type's size is handed over to the other.
+ * Weighting by the evictable size throttles the type with less
+ * content. On entry, nr[] holds the evictable size of each type,
+ * bounding the scan budget handed back in nr[] on return; a share
+ * exceeding one type's size is handed over to the other.
  *
  * The counters are read without the LRU lock, as a stale snapshot merely
  * skews the split for one pass.
@@ -4941,19 +4942,16 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 	}
 
 	/*
-	 * Cross-multiplying the ratio above gives:
-	 * anon_scan = total_scan * (swappiness * r_file * nr[ANON]) /
-	 *     ((MAX_SWAPPINESS - swappiness) * r_anon * nr[FILE] +
-	 *      swappiness * r_file * nr[ANON])
+	 * anon : file = swappiness * r_file * nr[ANON] :
+	 *               (MAX_SWAPPINESS - swappiness) * r_anon * nr[FILE]
+	 *
+	 * Folded into one 128-bit division, so neither term truncates and
+	 * the denominator is nonzero whenever nr[] is nonempty.
 	 */
-	anon_factor = (u64)swappiness * refault_pm[LRU_GEN_FILE];
-	file_factor = (u64)(MAX_SWAPPINESS - swappiness) * refault_pm[LRU_GEN_ANON];
+	anon_factor = (u64)swappiness * refault_pm[LRU_GEN_FILE] * nr[LRU_GEN_ANON];
+	file_factor = (u64)(MAX_SWAPPINESS - swappiness) * refault_pm[LRU_GEN_ANON] * nr[LRU_GEN_FILE];
 
-	anon_factor = anon_factor * nr[LRU_GEN_ANON] / total;
-	file_factor = file_factor * nr[LRU_GEN_FILE] / total;
-
-	/* The +1 guards against division by zero if both factors underflow. */
-	anon_scan = (u64)total_scan * anon_factor / (anon_factor + file_factor + 1);
+	anon_scan = mul_u64_u64_div_u64(total_scan, anon_factor, anon_factor + file_factor);
 	file_scan = (u64)total_scan - anon_scan;
 
 	/*
