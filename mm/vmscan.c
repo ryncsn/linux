@@ -4770,7 +4770,7 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	 * newest generation when under severe pressure, so hot folios are
 	 * not evicted as soon as priority is raised.
 	 */
-	if (sc->priority > DEF_PRIORITY - 2)
+	if (sc->priority == DEF_PRIORITY)
 		seq = lrugen->max_seq - MIN_NR_GENS;
 	else
 		seq = lrugen->max_seq;
@@ -4901,25 +4901,38 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 	for (int type = LRU_GEN_ANON; type <= LRU_GEN_FILE; type++) {
 		int hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
 		/* Start with 1 or MIN_LRU_BATCH to avoid divide by zero */
-		u64 refaulted = MIN_LRU_BATCH, evicted = MIN_LRU_BATCH;
+		u64 refaulted = MIN_LRU_BATCH, total = MIN_LRU_BATCH;
+		u64 bias = MIN_LRU_BATCH;
 
+		/*
+		 * Lockless monolith read is fine for MGLRU because, if the type
+		 * isn thrashing or having a lot of refault, aging is triggered
+		 * and the statistic gets averaged for every aging. If it's not
+		 * aging, we reads the accumulated total value, leading to a small
+		 * refault rate as expected.
+		 *
+		 * If aging is blocked due to unfair type hotness, reclaim will
+		 * be blocked at low priority, raised priority will driven the
+		 * aging.
+		 */
 		for (int tier = 0; tier < MAX_NR_TIERS; tier++) {
-			refaulted += READ_ONCE(lrugen->avg_refaulted[type][tier]) +
-				     atomic_long_read(&lrugen->refaulted[hist][type][tier]);
-			evicted += READ_ONCE(lrugen->avg_total[type][tier]) +
-				   atomic_long_read(&lrugen->evicted[hist][type][tier]);
+			refaulted += READ_ONCE(lrugen->avg_refaulted[type][tier]);
+			refaulted += atomic_long_read(&lrugen->refaulted[hist][type][tier]);
+
+			total += READ_ONCE(lrugen->avg_total[type][tier]);
+			total += atomic_long_read(&lrugen->evicted[hist][type][tier]);
 		}
+		total += nr[type];
 
 		/*
 		 * The refault rate scaled to 1024 (100%), clamped, biased by
-		 * MIN_LRU_BATCH, and raised to the fourth power to approximate
+		 * MIN_LRU_BATCH to prevent divide by zero and over react,
+		 * and raised to the fourth power to approximate
 		 * the hard switch of the old type selection: a type refaulting
 		 * moderately more than the other quickly loses most of its
 		 * share, while a cheap type keeps almost all of it.
 		 */
-		refault_pm[type] = min_t(u64, refaulted * 1024 / evicted, 1024);
-		refault_pm[type] = max(refault_pm[type] * refault_pm[type] / 1024, 1);
-		refault_pm[type] = max(refault_pm[type] * refault_pm[type] / 1024, 1);
+		refault_pm[type] = min_t(u64, refaulted * 1024 / total, 1024) + bias;
 	}
 
 	/*
