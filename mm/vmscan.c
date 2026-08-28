@@ -4865,16 +4865,16 @@ static int get_tier_idx(struct lruvec *lruvec, int type)
  * PID controller. Swappiness is the direct balance factor encoding the IO
  * cost of swap vs fs (Documentation/admin-guide/sysctl/vm.rst).
  *
- * With r_anon and r_file the refault rates, we have:
+ * With r_anon and r_file the per-type refault rates, scaled to 4096 (100%)
+ * and floored at 1, the split is:
  *
- *	anon : file = swappiness / r_anon :
- *		      (MAX_SWAPPINESS - swappiness) / r_file
+ *	anon : file = swappiness * r_file * nr[ANON] :
+ *		      (MAX_SWAPPINESS - swappiness) * r_anon * nr[FILE]
  *
- * The rates are raised to the fourth power so the split reacts sharply
- * to refault differences, like the hard switch of the old selector.
- *
- * On entry, nr[] holds the evictable size of each type, bounding the
- * scan budget handed back in nr[] on return.
+ * Weighting by the evictable size makes the split proportional to size
+ * when the rates are equal. On entry, nr[] holds the evictable size of
+ * each type, bounding the scan budget handed back in nr[] on return; a
+ * share exceeding one type's size is handed over to the other.
  *
  * The counters are read without the LRU lock, as a stale snapshot merely
  * skews the split for one pass.
@@ -4887,6 +4887,11 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 	u64 anon_scan, file_scan, total;
 
 	total = nr[LRU_GEN_ANON] + nr[LRU_GEN_FILE];
+
+	/* no evictable pages of either type */
+	if (!total)
+		return;
+
 	if (swappiness <= MIN_SWAPPINESS) {
 		nr[LRU_GEN_ANON] = 0;
 		nr[LRU_GEN_FILE] = min_t(u64, total_scan, nr[LRU_GEN_FILE]);
@@ -4901,44 +4906,45 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 
 	for (int type = LRU_GEN_ANON; type <= LRU_GEN_FILE; type++) {
 		int hist = lru_hist_from_seq(READ_ONCE(lrugen->min_seq[type]));
-		/* Start with MIN_LRU_BATCH to avoid over react on small values */
+		/* start at MIN_LRU_BATCH to smooth the rate on small counts */
 		u64 refaulted = MIN_LRU_BATCH, evicted = MIN_LRU_BATCH;
 
 		/*
-		 * Lockless monolith read is fine for MGLRU because, if the type
-		 * isn thrashing or having a lot of refault, aging is triggered
-		 * and the statistic gets averaged for every aging. If it's not
-		 * aging, we reads the accumulated evicted value, leading to a small
-		 * refault rate as expected.
-		 *
-		 * If aging is blocked due to unfair type hotness, reclaim will
-		 * be blocked at low priority, raised priority will driven the
-		 * aging.
+		 * Lockless monolithic reads are fine for MGLRU: if the type
+		 * isn't thrashing, aging is triggered and the statistic gets
+		 * averaged per aging; if it isn't aging, the accumulated
+		 * evicted value yields a small refault rate, as expected. If
+		 * aging is blocked by unfair type hotness, reclaim is blocked
+		 * at low priority and a raised priority drives the aging.
 		 */
 		for (int tier = 0; tier < MAX_NR_TIERS; tier++) {
 			refaulted += READ_ONCE(lrugen->avg_refaulted[type][tier]);
 			refaulted += atomic_long_read(&lrugen->refaulted[hist][type][tier]);
 
+			/*
+			 * Protected pages left the eviction path too, so they
+			 * count against the rate like evicted ones.
+			 */
 			evicted += READ_ONCE(lrugen->avg_total[type][tier]);
 			evicted += READ_ONCE(lrugen->protected[hist][type][tier]);
 			evicted += atomic_long_read(&lrugen->evicted[hist][type][tier]);
 		}
 
 		/*
-		 * The refault rate scaled to 4096 (100%), clamped, biased by
-		 * MIN_LRU_BATCH to prevent divide by zero and over react,
-		 * and raised to the fourth power to approximate
-		 * the hard switch of the old type selection: a type refaulting
-		 * moderately more than the other quickly loses most of its
-		 * share, while a cheap type keeps almost all of it.
+		 * The refault rate scaled to 4096 (100%), clamped to [1, 4096].
+		 * The MIN_LRU_BATCH bias makes a type with no history start at
+		 * 100% and decay as evictions accumulate without refaults. The
+		 * floor of 1 keeps a type that never refaults from zeroing out
+		 * the other type's share regardless of swappiness.
 		 */
-		refault_pm[type] = min_t(u64, refaulted * 4096 / evicted, 4096);
+		refault_pm[type] = clamp_t(u64, refaulted * 4096 / evicted, 1, 4096);
 	}
 
 	/*
 	 * Cross-multiplying the ratio above gives:
-	 * anon_scan = total_scan * (swappiness * r_file) /
-	 *     ((MAX_SWAPPINESS - swappiness) * r_anon + swappiness * r_file)
+	 * anon_scan = total_scan * (swappiness * r_file * nr[ANON]) /
+	 *     ((MAX_SWAPPINESS - swappiness) * r_anon * nr[FILE] +
+	 *      swappiness * r_file * nr[ANON])
 	 */
 	anon_factor = (u64)swappiness * refault_pm[LRU_GEN_FILE];
 	file_factor = (u64)(MAX_SWAPPINESS - swappiness) * refault_pm[LRU_GEN_ANON];
@@ -4946,12 +4952,14 @@ static void lru_gen_balance_scan(struct lruvec *lruvec, int swappiness,
 	anon_factor = anon_factor * nr[LRU_GEN_ANON] / total;
 	file_factor = file_factor * nr[LRU_GEN_FILE] / total;
 
+	/* The +1 guards against division by zero if both factors underflow. */
 	anon_scan = (u64)total_scan * anon_factor / (anon_factor + file_factor + 1);
 	file_scan = (u64)total_scan - anon_scan;
 
 	/*
 	 * Bound each type by its evictable size; hand the share exceeding
-	 * one type's size over to the other.
+	 * one type's size over to the other. Any excess left when
+	 * total_scan exceeds both sizes is dropped.
 	 */
 	if (anon_scan > nr[LRU_GEN_ANON]) {
 		file_scan += anon_scan - nr[LRU_GEN_ANON];
