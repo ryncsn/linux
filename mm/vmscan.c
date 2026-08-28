@@ -4758,7 +4758,6 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 	DEFINE_MAX_SEQ(lruvec);
-	DEFINE_MIN_SEQ(lruvec);
 
 	VM_WARN_ON_ONCE(nr_to_scan > MAX_LRU_BATCH);
 	VM_WARN_ON_ONCE(!list_empty(list));
@@ -4771,10 +4770,14 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	 * newest generation when under severe pressure, so hot folios are
 	 * not evicted as soon as priority is raised.
 	 */
-	if (get_nr_gens(lruvec, type) <= MIN_NR_GENS)
-		return 0;
+	if (sc->priority > DEF_PRIORITY - 2)
+		seq = lrugen->max_seq - MIN_NR_GENS;
+	else if (sc->priority > DEF_PRIORITY / 2)
+		seq = lrugen->max_seq - 1;
+	else
+		seq = lrugen->max_seq;
 
-	seq = min_seq[type];
+	seq = lruvec_populated_min_seq(lruvec, type, sc->reclaim_idx + 1, seq);
 	gen = lru_gen_from_seq(seq);
 	max_gen = lru_gen_from_seq(max_seq);
 
