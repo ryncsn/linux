@@ -4819,13 +4819,6 @@ enum {
 	MEMCG_LRU_YOUNG,
 };
 
-#ifdef CONFIG_MEMCG
-
-static int lru_gen_memcg_seg(struct lruvec *lruvec)
-{
-	return READ_ONCE(lruvec->lrugen.seg);
-}
-
 static void lru_gen_rotate_memcg(struct lruvec *lruvec, int op)
 {
 	int seg;
@@ -4871,6 +4864,8 @@ static void lru_gen_rotate_memcg(struct lruvec *lruvec, int op)
 
 	spin_unlock_irqrestore(&pgdat->memcg_lru.lock, flags);
 }
+
+#ifdef CONFIG_MEMCG
 
 void lru_gen_online_memcg(struct mem_cgroup *memcg)
 {
@@ -4937,18 +4932,11 @@ unlock:
 void lru_gen_soft_reclaim(struct lruvec *lruvec)
 {
 	/* see the comment on MEMCG_NR_GENS */
-	if (lru_gen_memcg_seg(lruvec) != MEMCG_LRU_HEAD)
+	if (READ_ONCE(lruvec->lrugen.seg) != MEMCG_LRU_HEAD)
 		lru_gen_rotate_memcg(lruvec, MEMCG_LRU_HEAD);
 }
 
-#else /* !CONFIG_MEMCG */
-
-static int lru_gen_memcg_seg(struct lruvec *lruvec)
-{
-	return 0;
-}
-
-#endif
+#endif /* CONFIG_MEMCG */
 
 /******************************************************************************
  *                          the eviction
@@ -5503,7 +5491,7 @@ static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
 
 	if (mem_cgroup_below_low(memcg)) {
 		/* see the comment on MEMCG_NR_GENS */
-		if (lru_gen_memcg_seg(lruvec) != MEMCG_LRU_TAIL)
+		if (READ_ONCE(lruvec->lrugen.seg) != MEMCG_LRU_TAIL)
 			return MEMCG_LRU_TAIL;
 
 		memcg_memory_event(memcg, MEMCG_LOW);
@@ -5527,11 +5515,9 @@ static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
 		return 0;
 
 	/* one retry if offlined or too small */
-	return lru_gen_memcg_seg(lruvec) != MEMCG_LRU_TAIL ?
+	return READ_ONCE(lruvec->lrugen.seg) != MEMCG_LRU_TAIL ?
 	       MEMCG_LRU_TAIL : MEMCG_LRU_YOUNG;
 }
-
-#ifdef CONFIG_MEMCG
 
 static void shrink_many(struct pglist_data *pgdat, struct scan_control *sc)
 {
@@ -5625,19 +5611,6 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 	blk_finish_plug(&plug);
 }
 
-#else /* !CONFIG_MEMCG */
-
-static void shrink_many(struct pglist_data *pgdat, struct scan_control *sc)
-{
-	BUILD_BUG();
-}
-
-static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
-{
-	BUILD_BUG();
-}
-
-#endif
 
 static void set_initial_priority(struct pglist_data *pgdat, struct scan_control *sc)
 {
@@ -5665,7 +5638,6 @@ static void set_initial_priority(struct pglist_data *pgdat, struct scan_control 
 	 */
 	sc->priority = clamp(priority, DEF_PRIORITY / 2, DEF_PRIORITY);
 }
-
 static void lru_gen_shrink_node(struct pglist_data *pgdat, struct scan_control *sc)
 {
 	struct blk_plug plug;
@@ -6297,6 +6269,18 @@ static const struct file_operations lru_gen_ro_fops = {
  *                          initialization
  ******************************************************************************/
 
+void lru_gen_init_pgdat(struct pglist_data *pgdat)
+{
+	int i, j;
+
+	spin_lock_init(&pgdat->memcg_lru.lock);
+
+	for (i = 0; i < MEMCG_NR_GENS; i++) {
+		for (j = 0; j < MEMCG_NR_BINS; j++)
+			INIT_HLIST_NULLS_HEAD(&pgdat->memcg_lru.fifo[i][j], i);
+	}
+}
+
 void lru_gen_init_lruvec(struct lruvec *lruvec)
 {
 	int i;
@@ -6318,18 +6302,6 @@ void lru_gen_init_lruvec(struct lruvec *lruvec)
 }
 
 #ifdef CONFIG_MEMCG
-
-void lru_gen_init_pgdat(struct pglist_data *pgdat)
-{
-	int i, j;
-
-	spin_lock_init(&pgdat->memcg_lru.lock);
-
-	for (i = 0; i < MEMCG_NR_GENS; i++) {
-		for (j = 0; j < MEMCG_NR_BINS; j++)
-			INIT_HLIST_NULLS_HEAD(&pgdat->memcg_lru.fifo[i][j], i);
-	}
-}
 
 void lru_gen_init_memcg(struct mem_cgroup *memcg)
 {
@@ -6390,14 +6362,17 @@ late_initcall(init_lru_gen);
 
 static void lru_gen_age_node(struct pglist_data *pgdat, struct scan_control *sc)
 {
+	BUILD_BUG();
 }
 
 static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 {
+	BUILD_BUG();
 }
 
 static void lru_gen_shrink_node(struct pglist_data *pgdat, struct scan_control *sc)
 {
+	BUILD_BUG();
 }
 
 #endif /* CONFIG_LRU_GEN */
