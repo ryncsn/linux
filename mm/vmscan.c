@@ -4621,18 +4621,18 @@ static bool inc_min_seq(struct lruvec *lruvec, int type, int swappiness)
 			if (gen_increased) {
 				delta += nr_pages;
 				list_move_tail(&folio->lru, &lrugen->folios[new_gen][type][zone]);
+
+				/* don't count the workingset being lazily promoted */
+				if (refs + workingset != BIT(LRU_REFS_WIDTH) + 1) {
+					int tier = lru_tier_from_refs(refs, workingset);
+
+					if (tier)
+						WRITE_ONCE(lrugen->protected[hist][type][tier - 1],
+							   lrugen->protected[hist][type][tier - 1] + nr_pages);
+				}
 			} else {
 				list_move(&folio->lru, &lrugen->folios[new_gen][type][zone]);
 			}
-			/* don't count the workingset being lazily promoted */
-			if (refs + workingset != BIT(LRU_REFS_WIDTH) + 1) {
-				int tier = lru_tier_from_refs(refs, workingset);
-
-				if (tier)
-					WRITE_ONCE(lrugen->protected[hist][type][tier - 1],
-						   lrugen->protected[hist][type][tier - 1] + nr_pages);
-			}
-
 			if (!--remaining)
 				break;
 		}
