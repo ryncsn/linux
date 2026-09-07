@@ -546,15 +546,11 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw);
  * 6. Finishing the aging on the eviction path, which triggers MEMCG_LRU_YOUNG;
  * 7. Offlining a memcg, which triggers MEMCG_LRU_OLD.
  *
- * Notes:
- * 1. Memcg LRU only applies to global reclaim, and the round-robin incrementing
- *    of their max_seq counters ensures the eventual fairness to all eligible
- *    memcgs. For memcg reclaim, it still relies on mem_cgroup_iter().
- * 2. There are only two valid generations: old (seq) and young (seq+1).
- *    MEMCG_NR_GENS is set to three so that when reading the generation counter
- *    locklessly, a stale value (seq-1) does not wraparound to young.
+ * Note that memcg LRU only applies to global reclaim, and the round-robin
+ * incrementing of their max_seq counters ensures the eventual fairness to all
+ * eligible memcgs. For memcg reclaim, it still relies on mem_cgroup_iter().
  */
-#define MEMCG_NR_GENS	3
+#define MEMCG_NR_GENS	2
 #define MEMCG_NR_BINS	8
 
 struct lru_gen_memcg {
