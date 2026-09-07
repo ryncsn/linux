@@ -5171,7 +5171,7 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
 
 	/* dirty lazyfree */
 	if (type == LRU_GEN_FILE && folio_test_anon(folio) && folio_test_dirty(folio)) {
-		success = lru_gen_del_folio(lruvec, folio, true);
+		bool success = lru_gen_del_folio(lruvec, folio, true);
 		VM_WARN_ON_ONCE_FOLIO(!success, folio);
 		folio_set_swapbacked(folio);
 		lruvec_add_folio_tail(lruvec, folio);
@@ -5376,6 +5376,7 @@ static int isolate_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	int type = get_type_to_scan(lruvec, swappiness);
 	int total_scanned = 0, scanned, tier = -1;
 	int type_to_scan = ANON_AND_FILE;
+	bool tried = false;
 
 	trace_android_vh_isolate_folio_type(swappiness, &type, &tier, &type_to_scan);
 	type_fallback_allowed = type_fallback_allowed && type_to_scan > 1;
@@ -5397,9 +5398,19 @@ retry:
 	 * We are running out of the current reclaim type. Fall back to
 	 * the other type if allowed.
 	 */
-	if (!scanned && type_fallback_allowed) {
+	if (!scanned && !tried && type_fallback_allowed) {
 		type = !type;
+		tried = true;
 		type_fallback_allowed = false;
+		tier = -1;
+		goto retry;
+	}
+	/*
+	 * We scanned some folios but failed to isolate any due to promotions,
+	 * protections, or races. Retry once to avoid a larger loop.
+	 */
+	if (scanned && !tried) {
+		tried = true;
 		tier = -1;
 		goto retry;
 	}
