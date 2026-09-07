@@ -415,12 +415,11 @@ enum {
 /*
  * The youngest generation number is stored in max_seq for both anon and file
  * types as they are aged on an equal footing. The oldest generation numbers are
- * stored in min_seq[] separately for anon and file types as clean file pages
- * can be evicted regardless of swap constraints.
- *
- * Normally anon and file min_seq are in sync. But if swapping is constrained,
- * e.g., out of swap space, file min_seq is allowed to advance and leave anon
- * min_seq behind.
+ * stored in min_seq[] separately for anon and file types so that they can be
+ * incremented independently. Ideally min_seq[] are kept in sync when both anon
+ * and file types are evictable. However, to adapt to situations like extreme
+ * swappiness, they are allowed to be out of sync by at most
+ * MAX_NR_GENS-MIN_NR_GENS-1.
  *
  * The number of pages in each generation is eventually consistent and therefore
  * can be transiently negative when reset_batch_size() is pending.
@@ -502,7 +501,7 @@ struct lru_gen_mm_walk {
 	bool can_swap;
 	bool force_scan;
 
-	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_USE(1, int swappiness);
 	ANDROID_KABI_RESERVE(2);
 };
 
