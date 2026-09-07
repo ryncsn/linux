@@ -60,10 +60,10 @@ static bool page_idle_clear_pte_refs_one(struct folio *folio,
 			 * For PTE-mapped THP, one sub page is referenced,
 			 * the whole THP is referenced.
 			 */
-			if (ptep_clear_young_notify(vma, addr, pvmw.pte))
+			if (ptep_test_and_clear_young_notify(vma, addr, pvmw.pte))
 				referenced = true;
 		} else if (IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE)) {
-			if (pmdp_clear_young_notify(vma, addr, pvmw.pmd))
+			if (pmdp_test_and_clear_young_notify(vma, addr, pvmw.pmd))
 				referenced = true;
 		} else {
 			/* unexpected pmd-mapped page? */

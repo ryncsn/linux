@@ -572,7 +572,7 @@ static inline void mmu_notifier_range_init_owner(
 	__young;							\
 })
 
-#define ptep_clear_young_notify(__vma, __address, __ptep)		\
+#define ptep_test_and_clear_young_notify(__vma, __address, __ptep)		\
 ({									\
 	int __young;							\
 	struct vm_area_struct *___vma = __vma;				\
@@ -583,7 +583,7 @@ static inline void mmu_notifier_range_init_owner(
 	__young;							\
 })
 
-#define pmdp_clear_young_notify(__vma, __address, __pmdp)		\
+#define pmdp_test_and_clear_young_notify(__vma, __address, __pmdp)		\
 ({									\
 	int __young;							\
 	struct vm_area_struct *___vma = __vma;				\
@@ -745,8 +745,8 @@ static inline void mmu_notifier_subscriptions_destroy(struct mm_struct *mm)
 
 #define ptep_clear_flush_young_notify ptep_clear_flush_young
 #define pmdp_clear_flush_young_notify pmdp_clear_flush_young
-#define ptep_clear_young_notify ptep_test_and_clear_young
-#define pmdp_clear_young_notify pmdp_test_and_clear_young
+#define ptep_test_and_clear_young_notify ptep_test_and_clear_young
+#define pmdp_test_and_clear_young_notify pmdp_test_and_clear_young
 #define	ptep_clear_flush_notify ptep_clear_flush
 #define pmdp_huge_clear_flush_notify pmdp_huge_clear_flush
 #define pudp_huge_clear_flush_notify pudp_huge_clear_flush
