@@ -906,10 +906,19 @@ static inline
 unsigned long mem_cgroup_get_zone_lru_size(struct lruvec *lruvec,
 		enum lru_list lru, int zone_idx)
 {
+	long val;
 	struct mem_cgroup_per_node *mz;
+	atomic_long_t *lru_zone_size;
+
+	BUILD_BUG_ON(sizeof(long) != sizeof(atomic_long_t));
 
 	mz = container_of(lruvec, struct mem_cgroup_per_node, lruvec);
-	return READ_ONCE(mz->lru_zone_size[zone_idx][lru]);
+	lru_zone_size = (void *)&mz->lru_zone_size[zone_idx][lru];
+	val = atomic_long_read(lru_zone_size);
+	if (val < 0)
+		return 0;
+
+	return val;
 }
 
 void mem_cgroup_handle_over_high(gfp_t gfp_mask);
