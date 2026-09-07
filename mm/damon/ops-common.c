@@ -40,7 +40,7 @@ void damon_ptep_mkold(pte_t *pte, struct vm_area_struct *vma, unsigned long addr
 	if (!page)
 		return;
 
-	if (ptep_clear_young_notify(vma, addr, pte))
+	if (ptep_test_and_clear_young_notify(vma, addr, pte))
 		set_page_young(page);
 
 	set_page_idle(page);
@@ -55,7 +55,7 @@ void damon_pmdp_mkold(pmd_t *pmd, struct vm_area_struct *vma, unsigned long addr
 	if (!page)
 		return;
 
-	if (pmdp_clear_young_notify(vma, addr, pmd))
+	if (pmdp_test_and_clear_young_notify(vma, addr, pmd))
 		set_page_young(page);
 
 	set_page_idle(page);
