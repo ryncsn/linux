@@ -5241,7 +5241,6 @@ struct mem_cgroup *mem_cgroup_from_id(unsigned short id)
 }
 EXPORT_SYMBOL_GPL(mem_cgroup_from_id);
 
-#ifdef CONFIG_SHRINKER_DEBUG
 struct mem_cgroup *mem_cgroup_get_from_ino(unsigned long ino)
 {
 	struct cgroup *cgrp;
@@ -5262,7 +5261,6 @@ struct mem_cgroup *mem_cgroup_get_from_ino(unsigned long ino)
 
 	return memcg;
 }
-#endif
 
 static int alloc_mem_cgroup_per_node_info(struct mem_cgroup *memcg, int node)
 {
