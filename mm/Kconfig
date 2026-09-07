@@ -1254,7 +1254,12 @@ config LRU_GEN_STATS
 
 config LRU_GEN_WALKS_MMU
 	def_bool y
-	depends on LRU_GEN && ARCH_HAS_HW_PTE_YOUNG
+	depends on LRU_GEN
+	# [DOWNSTREAM] dropped "&& ARCH_HAS_HW_PTE_YOUNG": that config
+	# symbol doesn't exist in GKI 6.1, and this tree still carries the
+	# software-young fallback (lru_gen_look_around) upstream removed
+	# before adding the dependency.  Without the walk code the MGLRU
+	# aging path breaks at boot.
 # }
 
 config ARCH_SUPPORTS_PER_VMA_LOCK
