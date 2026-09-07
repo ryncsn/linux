@@ -2756,6 +2756,30 @@ static inline bool ptlock_init(struct page *page) { return true; }
 static inline void ptlock_free(struct page *page) {}
 #endif /* USE_SPLIT_PTE_PTLOCKS */
 
+/*
+ * Like pte_offset_map(), but also returns the ptl.  The pmd is snapshotted
+ * first so that the ptl is derived from the same pmd value the caller will
+ * later verify with pmd_same() after acquiring the lock.
+ */
+static inline pte_t *pte_offset_map_ro_nolock(struct mm_struct *mm, pmd_t *pmd,
+					      unsigned long addr, spinlock_t **ptlp)
+{
+	pmd_t pmdval = READ_ONCE(*pmd);
+
+	*ptlp = pte_lockptr(mm, &pmdval);
+	return pte_offset_map(pmd, addr);
+}
+
+static inline pte_t *pte_offset_map_rw_nolock(struct mm_struct *mm, pmd_t *pmd,
+					      unsigned long addr, pmd_t *pmdvalp,
+					      spinlock_t **ptlp)
+{
+	VM_WARN_ON_ONCE(!pmdvalp);
+	*pmdvalp = READ_ONCE(*pmd);
+	*ptlp = pte_lockptr(mm, pmdvalp);
+	return pte_offset_map(pmd, addr);
+}
+
 static inline void pgtable_init(void)
 {
 	ptlock_cache_init();
