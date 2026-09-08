@@ -423,36 +423,9 @@ static void __lru_cache_activate_folio(struct folio *folio)
 	local_unlock(&cpu_fbatches.lock);
 }
 
-#ifdef CONFIG_LRU_GEN
-
-static bool lru_gen_clear_refs(struct folio *folio)
-{
-	struct lru_gen_folio *lrugen;
-	int gen = folio_lru_gen(folio);
-	int type = folio_is_file_lru(folio);
-
-	if (gen < 0)
-		return true;
-
-	folio_set_lru_refs(folio, 0);
-
-	lrugen = &folio_lruvec(folio)->lrugen;
-	/* whether can do without shuffling under the LRU lock */
-	return gen == lru_gen_from_seq(READ_ONCE(lrugen->min_seq[type]));
-}
-
-#else /* !CONFIG_LRU_GEN */
-
-static bool lru_gen_clear_refs(struct folio *folio)
-{
-	return false;
-}
-
-#endif /* CONFIG_LRU_GEN */
-
-/*
- * Mark a page as having seen activity.
- *
+/**
+ * folio_mark_accessed - Mark a folio as having seen activity.
+ * @folio: The folio to mark. *
  * inactive,unreferenced	->	inactive,referenced
  * inactive,referenced		->	active,unreferenced
  * active,unreferenced		->	active,referenced
@@ -626,7 +599,7 @@ static void lru_lazyfree_fn(struct lruvec *lruvec, struct folio *folio)
 		lruvec_del_folio(lruvec, folio);
 		folio_clear_active(folio);
 		if (lru_gen_enabled())
-			lru_gen_clear_refs(folio);
+			__folio_set_lru_refs(folio, 0);
 		else
 			folio_clear_referenced(folio);
 		/*
@@ -638,8 +611,7 @@ static void lru_lazyfree_fn(struct lruvec *lruvec, struct folio *folio)
 		lruvec_add_folio(lruvec, folio);
 
 		__count_vm_events(PGLAZYFREE, nr_pages);
-		__count_memcg_events(lruvec_memcg(lruvec), PGLAZYFREE,
-				     nr_pages);
+		__count_memcg_events(lruvec_memcg(lruvec), PGLAZYFREE, nr_pages);
 	}
 }
 
@@ -700,7 +672,7 @@ void deactivate_file_folio(struct folio *folio)
 	if (folio_test_unevictable(folio))
 		return;
 
-	if (lru_gen_enabled() && lru_gen_clear_refs(folio))
+	if (lru_gen_enabled() && !folio_reset_lru_refs(folio))
 		return;
 
 	folio_get(folio);
@@ -728,7 +700,7 @@ void deactivate_page(struct page *page)
 	if (!folio_test_lru(folio))
 		return;
 
-	if (lru_gen_enabled() ? lru_gen_clear_refs(folio) : !folio_test_active(folio))
+	if (lru_gen_enabled() ? !folio_reset_lru_refs(folio) : !folio_test_active(folio))
 		return;
 
 	{

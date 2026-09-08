@@ -11,6 +11,7 @@
 #include <linux/page_idle.h>
 #include <linux/pagemap.h>
 #include <linux/rmap.h>
+#include <linux/mm_inline.h>
 #include <linux/swap.h>
 
 #include "../internal.h"
@@ -205,7 +206,10 @@ static unsigned long damon_pa_pageout(struct damon_region *r)
 		if (!page)
 			continue;
 
-		ClearPageReferenced(page);
+		if (lru_gen_enabled())
+			folio_reset_lru_refs(page_folio(page));
+		else
+			folio_clear_referenced(page_folio(page));
 		test_and_clear_page_young(page);
 		if (isolate_lru_page(page)) {
 			put_page(page);
@@ -215,8 +219,7 @@ static unsigned long damon_pa_pageout(struct damon_region *r)
 			putback_lru_page(page);
 		else
 			list_add(&page->lru, &page_list);
-		put_page(page);
-	}
+		put_page(page);	}
 	applied = reclaim_pages(&page_list);
 	cond_resched();
 	return applied * PAGE_SIZE;
