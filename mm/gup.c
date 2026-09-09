@@ -2514,7 +2514,7 @@ static int gup_pte_range(pmd_t pmd, pmd_t *pmdp, unsigned long addr,
 				goto pte_unmap;
 			}
 		}
-		folio_set_referenced(folio);
+		folio_inc_lru_refs_fast(folio);
 		pages[*nr] = page;
 		(*nr)++;
 	} while (ptep++, addr += PAGE_SIZE, addr != end);
@@ -2688,7 +2688,7 @@ static int gup_hugepte(pte_t *ptep, unsigned long sz, unsigned long addr,
 	}
 
 	*nr += refs;
-	folio_set_referenced(folio);
+	folio_inc_lru_refs_fast(folio);
 	return 1;
 }
 
@@ -2754,7 +2754,7 @@ static int gup_huge_pmd(pmd_t orig, pmd_t *pmdp, unsigned long addr,
 	}
 
 	*nr += refs;
-	folio_set_referenced(folio);
+	folio_inc_lru_refs_fast(folio);
 	return 1;
 }
 
@@ -2794,7 +2794,7 @@ static int gup_huge_pud(pud_t orig, pud_t *pudp, unsigned long addr,
 	}
 
 	*nr += refs;
-	folio_set_referenced(folio);
+	folio_inc_lru_refs_fast(folio);
 	return 1;
 }
 
@@ -2824,7 +2824,7 @@ static int gup_huge_pgd(pgd_t orig, pgd_t *pgdp, unsigned long addr,
 	}
 
 	*nr += refs;
-	folio_set_referenced(folio);
+	folio_inc_lru_refs_fast(folio);
 	return 1;
 }
 
