@@ -859,7 +859,7 @@ void readahead_expand(struct readahead_control *ractl,
 			put_page(page);
 			return;
 		}
-		if (unlikely(PageWorkingset(page)) && !ractl->_workingset) {
+		if (unlikely(folio_test_workingset(page_folio(page))) && !ractl->_workingset) {
 			ractl->_workingset = true;
 			psi_memstall_enter(&ractl->_pflags);
 		}

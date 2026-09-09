@@ -436,7 +436,8 @@ static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
 		}
 
 		trace_android_vh_madvise_cold_or_pageout_page(pageout, page);
-		madvise_cold_or_pageout_prep_folio(page_folio(page));		if (pageout) {
+		madvise_cold_or_pageout_prep_folio(page_folio(page));
+		if (pageout) {
 			if (!isolate_lru_page(page)) {
 				if (PageUnevictable(page))
 					putback_lru_page(page);
@@ -542,7 +543,8 @@ regular_page:
 		 * because they will miss recent referenced history.
 		 */
 		trace_android_vh_madvise_cold_or_pageout_page(pageout, page);
-		madvise_cold_or_pageout_prep_folio(page_folio(page));		if (pageout) {
+		madvise_cold_or_pageout_prep_folio(page_folio(page));
+		if (pageout) {
 			if (!isolate_lru_page(page)) {
 				if (PageUnevictable(page))
 					putback_lru_page(page);

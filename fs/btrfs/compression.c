@@ -9,6 +9,7 @@
 #include <linux/fs.h>
 #include <linux/pagemap.h>
 #include <linux/pagevec.h>
+#include <linux/mm_inline.h>
 #include <linux/highmem.h>
 #include <linux/kthread.h>
 #include <linux/time.h>
@@ -581,7 +582,7 @@ static noinline int add_ra_bio_pages(struct inode *inode,
 			continue;
 		}
 
-		if (!*memstall && PageWorkingset(page)) {
+		if (!*memstall && folio_test_workingset(page_folio(page))) {
 			psi_memstall_enter(pflags);
 			*memstall = 1;
 		}

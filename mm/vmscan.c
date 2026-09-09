@@ -1697,7 +1697,8 @@ bool folio_reset_lru_refs(struct folio *folio)
  */
 static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 				   const vm_flags_t *vm_flags, int *new_gen,
-				   int *old_refs, int *new_refs, int *type){
+				   int *old_refs, int *new_refs, int *type)
+{
 	unsigned long new_flags, old_flags = READ_ONCE(*folio_flags(folio, 0));
 	unsigned long max_seq = READ_ONCE(lruvec->lrugen.max_seq);
 	int refs, old_gen, max_gen;
@@ -1711,7 +1712,7 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 		if (old_gen >= 0 && old_gen != max_gen) {
 			*new_refs = min(refs, LRU_REFS_PROTECTED);
 			/* Promote second page table access or executable */
-			if (refs > LRU_REFS_REFERENCED || is_exec_file_folio(folio, vma_flags))
+			if (refs > LRU_REFS_REFERENCED || is_exec_file_folio(folio, vm_flags))
 				*new_gen = max_gen;
 			else
 				*new_gen = (old_gen + 1) % MAX_NR_GENS;
@@ -4255,6 +4256,8 @@ static void reset_batch_size(struct lru_gen_mm_walk *walk)
 		walk->nr_pages[gen][type][zone] = 0;
 		atomic_long_add(delta, (atomic_long_t *)&lrugen->nr_pages[gen][type][zone]);
 	}
+}
+
 static int should_skip_vma(unsigned long start, unsigned long end, struct mm_walk *args)
 {
 	struct address_space *mapping;
@@ -4418,7 +4421,8 @@ static void walk_update_folio(struct lru_gen_mm_walk *walk, struct vm_area_struc
 
 	if (walk) {
 		old_gen = folio_inc_lru_refs_walk(folio, lruvec, &vma->vm_flags,
-						  &new_gen, &old_refs, &new_refs, &type);		if (old_gen >= 0)
+						  &new_gen, &old_refs, &new_refs, &type);
+		if (old_gen >= 0)
 			update_batch_size(walk, lruvec, folio, old_gen, new_gen,
 					  old_refs, new_refs, type);
 	} else {
@@ -5387,7 +5391,8 @@ void lru_gen_soft_reclaim(struct lruvec *lruvec)
 {
 	/* see the comment on MEMCG_NR_GENS */
 	if (READ_ONCE(lruvec->lrugen.seg) != MEMCG_LRU_HEAD)
-		lru_gen_rotate_memcg(lruvec, MEMCG_LRU_HEAD);}
+		lru_gen_rotate_memcg(lruvec, MEMCG_LRU_HEAD);
+}
 
 #endif /* CONFIG_MEMCG */
 
