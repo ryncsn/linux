@@ -1291,7 +1291,6 @@ void folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
 	struct lru_gen_folio *lrugen;
 	struct lruvec *lruvec;
 
-	type = folio_is_file_lru(folio);
 	rcu_read_lock();
 	lruvec = folio_lruvec(folio);
 	lrugen = &lruvec->lrugen;
@@ -1301,6 +1300,7 @@ void folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
 		new_flags = old_flags;
 		gen = lru_gen_from_flags(old_flags);
 		old_refs = lru_refs_from_flags(old_flags);
+		type = folio_flags_is_file_lru(&old_flags);
 		refs = old_refs + 1;
 		new_gen = gen;
 		if (!(old_flags & BIT(PG_lru)) || gen < 0)
@@ -1377,7 +1377,7 @@ bool folio_reset_lru_refs(struct folio *folio)
 	do {
 		new_flags = old_flags;
 		refs = lru_refs_from_flags(old_flags);
-		type = folio_is_file_lru(folio);
+		type = folio_flags_is_file_lru(&old_flags);
 		gen = lru_gen_from_flags(old_flags);
 		if (!refs)
 			break;
@@ -3768,7 +3768,7 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 		}
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
-	*type = folio_is_file_lru(folio);
+	*type = folio_flags_is_file_lru(&old_flags);
 	*old_refs = lru_refs_from_flags(old_flags);
 
 	return old_gen;
@@ -3777,7 +3777,7 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 /* protect pages accessed multiple times through file descriptors */
 static int folio_inc_gen(struct lruvec *lruvec, struct folio *folio)
 {
-	int refs, old_refs;
+	int refs, old_refs, file;
 	int type = folio_is_file_lru(folio);
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 	int old_gen, new_gen, min_gen = lru_gen_from_seq(lrugen->min_seq[type]);
@@ -3787,6 +3787,7 @@ static int folio_inc_gen(struct lruvec *lruvec, struct folio *folio)
 		new_flags = old_flags;
 		old_refs = lru_refs_from_flags(old_flags);
 		old_gen = lru_gen_from_flags(old_flags);
+		file = folio_flags_is_file_lru(&old_flags);
 		VM_WARN_ON_ONCE_FOLIO(old_gen < 0, folio);
 
 		/* folio has been promoted? */
@@ -3801,7 +3802,7 @@ static int folio_inc_gen(struct lruvec *lruvec, struct folio *folio)
 
 	/* Refs capped below PROTECTED: demote if previously active. */
 	if (lru_refs_is_active(old_refs) != lru_refs_is_active(refs)) {
-		enum lru_list lru = type * LRU_INACTIVE_FILE;
+		enum lru_list lru = file * LRU_INACTIVE_FILE;
 		int nr_pages = folio_nr_pages(folio);
 
 		__update_lru_size(lruvec, lru + lru_refs_is_active(old_refs),
