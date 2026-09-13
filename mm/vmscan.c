@@ -2470,8 +2470,25 @@ static void handle_reclaim_writeback(unsigned long nr_taken,
 	 * the flushers simply cannot keep up with the allocation
 	 * rate. Nudge the flusher threads in case they are asleep.
 	 */
-	if (stat->nr_unqueued_dirty == nr_taken)
+	if (stat->nr_unqueued_dirty == nr_taken) {
 		wakeup_flusher_threads(WB_REASON_VMSCAN);
+
+		/*
+		 * For cgroupv1 dirty throttling is achieved by waking up
+		 * the kernel flusher here and later waiting on folios
+		 * which are in writeback to finish (see shrink_page_list()).
+		 *
+		 * Flusher may not be able to issue writeback quickly
+		 * enough for cgroupv1 writeback throttling to work
+		 * on a large system.
+		 *
+		 * This kernel predates reclaim_throttle(), so use the same
+		 * block congestion wait as the classical LRU path in
+		 * balance_pgdat().
+		 */
+		if (!writeback_throttling_sane(sc))
+			congestion_wait(BLK_RW_ASYNC, HZ/10);
+	}
 
 	sc->nr.dirty += stat->nr_dirty;
 	sc->nr.congested += stat->nr_congested;
