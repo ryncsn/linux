@@ -5630,7 +5630,7 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 
 	blk_start_plug(&plug);
 
-	set_mm_walk(NULL, false);
+	set_mm_walk(NULL, sc->proactive);
 
 	if (try_to_shrink_lruvec(lruvec, sc))
 		; /* Memcg rotation is done by iteration */
