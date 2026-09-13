@@ -1344,7 +1344,7 @@ out:
 		 * hotness inversion. In that very unlikely case,
 		 * just activate the folio.
 		 */
-		lru_gen_update_size(lruvec, folio, gen, new_gen);
+		lru_gen_update_size(lruvec, type, folio, gen, new_gen);
 		if (unlikely(READ_ONCE(lrugen->max_seq) - max_seq > MIN_NR_GENS))
 			folio_activate(folio);
 	}
@@ -3844,7 +3844,7 @@ static int folio_inc_gen(struct lruvec *lruvec, struct folio *folio)
 
 	new_gen = __folio_inc_gen(lruvec, folio, old_gen, &gen_increased);
 	if (gen_increased)
-		lru_gen_update_size(lruvec, folio, old_gen, new_gen);
+		lru_gen_update_size(lruvec, type, folio, old_gen, new_gen);
 
 	return new_gen;
 }
