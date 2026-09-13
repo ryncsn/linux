@@ -5162,7 +5162,7 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
 		int hist = lru_hist_from_seq(lrugen->min_seq[type]);
 
 		gen = folio_inc_gen(lruvec, folio);
-		list_move_tail(&folio->lru, &lrugen->lists[gen][type][zone]);
+		list_move(&folio->lru, &lrugen->lists[gen][type][zone]);
 
 		if (tier)
 			WRITE_ONCE(lrugen->protected[hist][type][tier - 1],
