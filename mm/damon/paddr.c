@@ -235,7 +235,7 @@ static unsigned long damon_pa_apply_scheme(struct damon_ctx *ctx,
 		 * so the hotness can be, and better be dropped.
 		 */
 		if (lru_gen_enabled())
-			folio_set_lru_refs(page_folio(page), 0);
+			folio_reset_lru_refs(page_folio(page));
 		else
 			ClearPageReferenced(page);
 		test_and_clear_page_young(page);

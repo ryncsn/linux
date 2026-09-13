@@ -391,33 +391,6 @@ static void __lru_cache_activate_page(struct page *page)
 	local_unlock(&lru_pvecs.lock);
 }
 
-#ifdef CONFIG_LRU_GEN
-
-static bool lru_gen_clear_refs(struct folio *folio)
-{
-	struct lru_gen_struct *lrugen;
-	int gen = folio_lru_gen(folio);
-	int type = folio_is_file_lru(folio);
-
-	if (gen < 0)
-		return true;
-
-	folio_set_lru_refs(folio, 0);
-
-	lrugen = &folio_lruvec(folio)->lrugen;
-	/* whether can do without shuffling under the LRU lock */
-	return gen == lru_gen_from_seq(READ_ONCE(lrugen->min_seq[type]));
-}
-
-#else
-
-static bool lru_gen_clear_refs(struct folio *folio)
-{
-	return false;
-}
-
-#endif /* CONFIG_LRU_GEN */
-
 /*
  * Mark a page as having seen activity.
  *
@@ -590,7 +563,7 @@ static void lru_deactivate_fn(struct page *page, struct lruvec *lruvec)
 
 	del_page_from_lru_list(page, lruvec);
 	ClearPageActive(page);
-	folio_set_lru_refs(page_folio(page), 0);
+	folio_clear_referenced(page_folio(page));
 	add_page_to_lru_list(page, lruvec);
 
 	__count_vm_events(PGDEACTIVATE, nr_pages);
@@ -607,7 +580,10 @@ static void lru_lazyfree_fn(struct page *page, struct lruvec *lruvec)
 
 	del_page_from_lru_list(page, lruvec);
 	ClearPageActive(page);
-	folio_set_lru_refs(page_folio(page), 0);
+	if (lru_gen_enabled())
+		__folio_set_lru_refs(page_folio(page), 0);
+	else
+		folio_clear_referenced(page_folio(page));
 
 	/*
 	 * Lazyfree pages are clean anonymous pages.  They have
@@ -679,7 +655,7 @@ void deactivate_file_page(struct page *page)
 	if (likely(get_page_unless_zero(page))) {
 		struct pagevec *pvec;
 
-		if (lru_gen_enabled() && lru_gen_clear_refs(page))
+		if (lru_gen_enabled() && !folio_reset_lru_refs(page_folio(page)))
 			return;
 
 		local_lock(&lru_pvecs.lock);
@@ -705,7 +681,7 @@ void deactivate_page(struct page *page)
 	    (PageActive(page) || lru_gen_enabled())) {
 		struct pagevec *pvec;
 
-		if (lru_gen_enabled() && lru_gen_clear_refs(page))
+		if (lru_gen_enabled() && !folio_reset_lru_refs(page_folio(page)))
 			return;
 
 		local_lock(&lru_pvecs.lock);

@@ -2269,7 +2269,7 @@ static void __maybe_unused undo_dev_pagemap(int *nr, int nr_start,
 	while ((*nr) - nr_start) {
 		struct page *page = pages[--(*nr)];
 
-		folio_set_lru_refs(page_folio(page), 0);
+		__folio_set_lru_refs(page_folio(page), 0);
 		if (flags & FOLL_PIN)
 			unpin_user_page(page);
 		else
