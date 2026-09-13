@@ -5324,7 +5324,8 @@ retry:
 			continue;
 		}
 
-		/* don't add rejected folios to the oldest generation */
+		/* Reset folio's refs before return */
+		__folio_set_lru_refs(folio, min(folio_lru_refs(folio), LRU_REFS_WORKINGSET));
 		if (lru_gen_folio_seq(lruvec, folio, false) == min_seq[type])
 			folio_set_active(folio);
 	}
