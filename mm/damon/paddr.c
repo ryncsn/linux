@@ -230,7 +230,13 @@ static unsigned long damon_pa_apply_scheme(struct damon_ctx *ctx,
 		if (!page)
 			continue;
 
-		if (!lru_gen_enabled())
+		/*
+		 * DAMON only gets here for regions it measured as cold,
+		 * so the hotness can be, and better be dropped.
+		 */
+		if (lru_gen_enabled())
+			folio_set_lru_refs(page_folio(page), 0);
+		else
 			ClearPageReferenced(page);
 		test_and_clear_page_young(page);
 		if (isolate_lru_page(page)) {
