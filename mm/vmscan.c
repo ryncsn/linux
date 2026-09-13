@@ -1282,7 +1282,7 @@ static inline bool is_exec_file_folio(struct folio *folio, unsigned long vm_flag
  * isolation, or lruvec lock. Used by both page table access (@promote=true)
  * and by file access (@is_fault=false).
  */
-int folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
+void folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
 {
 	int max_gen, min_gen;
 	int type, refs, gen, new_gen;
@@ -1348,7 +1348,6 @@ out:
 	}
 
 	rcu_read_unlock();
-	return refs;
 }
 
 /*

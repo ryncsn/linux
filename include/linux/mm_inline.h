@@ -222,7 +222,8 @@ static inline void lru_refs_set_flags(unsigned long *flags, unsigned int refs)
 		*flags |= BIT(PG_referenced);
 	if (refs & BIT(1))
 		*flags |= BIT(PG_workingset);
-	*flags |= (((unsigned long)refs) >> 2) << LRU_REFS_PGOFF;
+	if (LRU_REFS_WIDTH)
+		*flags |= (((unsigned long)refs) >> 2) << LRU_REFS_PGOFF;
 }
 
 static inline int folio_lru_refs(const struct folio *folio)
@@ -356,6 +357,16 @@ static inline void folio_migrate_refs(struct folio *new, const struct folio *old
 }
 
 #ifdef CONFIG_LRU_GEN
+void folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec);
+#else
+static inline void folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
+{
+	/* Should not be called with !CONFIG_LRU_GEN */
+	WARN_ON_ONCE(1);
+}
+#endif
+
+#ifdef CONFIG_LRU_GEN
 
 static inline bool lru_gen_switching(void)
 {
@@ -420,8 +431,6 @@ static inline void lru_gen_set_flags(unsigned long *flags, int gen)
 	*flags |= (gen + 1UL) << LRU_GEN_PGOFF;
 }
 
-int folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec);
-
 static inline int folio_lru_gen(const struct folio *folio)
 {
 	return lru_gen_from_flags(READ_ONCE(*const_folio_flags(folio, 0)));
@@ -477,7 +486,7 @@ static inline void lru_gen_update_size(struct lruvec *lruvec, struct folio *foli
 		__update_lru_size(lruvec, lru + LRU_ACTIVE, zone, delta);
 	}
 
-	/* demotion requires isolation, e.g., llru_gen_folio_seqru_deactivate_fn() */
+	/* demotion requires isolation, e.g., lru_deactivate_fn() */
 	VM_WARN_ON_ONCE(lru_gen_is_active(lruvec, old_gen) && !lru_gen_is_active(lruvec, new_gen));
 }
 
