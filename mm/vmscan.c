@@ -5852,7 +5852,7 @@ static void lru_gen_change_state(bool enabled)
 	get_online_mems();
 	mutex_lock(&state_mutex);
 
-	if (enabled == lru_gen_enabled())
+	if (!enabled || enabled == lru_gen_enabled())
 		goto unlock;
 
 	if (enabled)
@@ -5950,6 +5950,16 @@ static ssize_t store_enabled(struct kobject *kobj, struct kobj_attribute *attr,
 	else if (tolower(*buf) == 'y')
 		caps = -1;
 	else if (kstrtouint(buf, 0, &caps))
+		return -EINVAL;
+
+	/*
+	 * MGLRU is force-enabled downstream (lru_gen_enabled() is constant
+	 * true): honouring a request that clears LRU_GEN_CORE would run
+	 * lru_gen_change_state(false), draining every lruvec into the
+	 * traditional LRUs while lru_gen_enabled() still selects the MGLRU
+	 * reclaim paths, which then find nothing to reclaim.
+	 */
+	if (!(caps & BIT(LRU_GEN_CORE)))
 		return -EINVAL;
 
 	for (i = 0; i < NR_LRU_GEN_CAPS; i++) {
