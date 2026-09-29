@@ -942,7 +942,8 @@ enum folio_references {
  * (folio_mark_accessed).
  *
  * Page table accesses escalate a folio in two steps.  The first access
- * advances it one generation; a second access sends it to the newest
+ * only bumps refs, or advances the folio one generation if it is in the
+ * oldest one; a second access sends it to the newest
  * generation.  Executable file folios skip the first step and are promoted
  * immediately, as reclaiming them causes IO thrashing.
  *
@@ -1003,7 +1004,8 @@ void folio_inc_lru_refs(struct folio *folio, unsigned int flags)
 			/* Promote second page table access or executable */
 			if (refs > LRU_REFS_REFERENCED || flags & LRU_REF_EXEC)
 				gen = max_gen;
-			else
+			/* First access only defers eviction from the oldest gen */
+			else if (old_gen == min_gen)
 				gen = (old_gen + 1) % MAX_NR_GENS;
 			refs = min(refs, LRU_REFS_PROTECTED);
 		} else if (refs > LRU_REFS_MAX) {
@@ -1020,6 +1022,8 @@ out:
 		lru_set_refs_flags(&new_flags, refs);
 		if (gen != old_gen)
 			lru_set_gen_flags(&new_flags, gen);
+		if (new_flags == old_flags)
+			break;
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
 	if (gen != old_gen) {
@@ -1102,12 +1106,14 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 {
 	unsigned long new_flags, old_flags = READ_ONCE(*folio_flags(folio, 0));
 	unsigned long max_seq = READ_ONCE(lruvec->lrugen.max_seq);
-	int refs, old_gen, max_gen;
+	int refs, old_gen, min_gen, max_gen;
 
 	max_gen = lru_gen_from_seq(max_seq);
 	do {
 		old_gen = lru_get_gen_flags(old_flags);
 		refs = lru_get_refs_flags(old_flags) + 1;
+		*type = folio_flags_is_file_lru(&old_flags);
+		min_gen = lru_gen_from_seq(READ_ONCE(lruvec->lrugen.min_seq[*type]));
 		new_flags = old_flags;
 
 		if (old_gen >= 0 && old_gen != max_gen) {
@@ -1115,8 +1121,11 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 			/* Promote second page table access or executable */
 			if (refs > LRU_REFS_REFERENCED || is_exec_file_folio(folio, vma_flags))
 				*new_gen = max_gen;
-			else
+			/* First access only defers eviction from the oldest gen */
+			else if (old_gen == min_gen)
 				*new_gen = (old_gen + 1) % MAX_NR_GENS;
+			else
+				*new_gen = old_gen;
 			lru_set_gen_flags(&new_flags, *new_gen);
 			lru_set_refs_flags(&new_flags, *new_refs);
 		} else {
@@ -1124,9 +1133,10 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 			*new_refs = min(refs, LRU_REFS_MAX);
 			lru_set_refs_flags(&new_flags, *new_refs);
 		}
+		if (new_flags == old_flags)
+			break;
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
-	*type = folio_flags_is_file_lru(&old_flags);
 	*old_refs = lru_get_refs_flags(old_flags);
 
 	return old_gen;
@@ -2508,6 +2518,10 @@ unsigned long reclaim_pages(struct list_head *folio_list)
 
 		if (nid == folio_nid(folio)) {
 			folio_clear_active(folio);
+			/* Drop the recency but keep the workingset, like classical LRU */
+			if (lru_gen_enabled())
+				__folio_set_lru_refs(folio, folio_test_workingset(folio) ?
+						     LRU_REFS_WORKINGSET : 0);
 			list_move(&folio->lru, &node_folio_list);
 			continue;
 		}
@@ -4926,7 +4940,8 @@ static void __lru_gen_reparent_memcg(struct lruvec *child_lruvec, struct lruvec 
 	child_lrugen = &child_lruvec->lrugen;
 	parent_lrugen = &parent_lruvec->lrugen;
 
-	for (i = 0; i < get_nr_gens(child_lruvec, type); i++) {
+	/* Lockless promotion may leave folios outside the child's window */
+	for (i = 0; i < MAX_NR_GENS; i++) {
 		int gen = lru_gen_from_seq(child_lrugen->max_seq - i);
 		long nr_pages = atomic_long_read(&child_lrugen->nr_pages[gen][type][zone]);
 

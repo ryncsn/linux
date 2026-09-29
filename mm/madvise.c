@@ -376,9 +376,8 @@ static void madvise_cold_or_pageout_prep_folio(struct folio *folio)
 
 	/*
 	 * MGLRU keeps this history in the refs count. MADV_COLD resets
-	 * it in folio_deactivate(), MADV_PAGEOUT hands the folio to
-	 * reclaim_pages(), which ignores the count, so keep it, and let
-	 * the eviction shadow record the folio's real hotness.
+	 * it in folio_deactivate(), MADV_PAGEOUT trims it in
+	 * reclaim_pages() once the folio is isolated.
 	 */
 	if (lru_gen_enabled())
 		return;
