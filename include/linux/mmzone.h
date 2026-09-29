@@ -434,7 +434,9 @@ enum lruvec_flags {
  * least twice before handing this folio over to the eviction. The first check
  * clears the accessed bit from the initial fault; the second check makes sure
  * this folio hasn't been used since then. This process, AKA second chance,
- * requires a minimum of two generations, hence MIN_NR_GENS.
+ * requires a minimum of two generations, hence MIN_NR_GENS.  Like page cache,
+ * new anon may be used only once, so it starts in the oldest generation and
+ * its first access moves it out of there.
  *
  * Active/inactive is per-folio based on the referenced count;
  * see the comment above MAX_NR_TIERS.

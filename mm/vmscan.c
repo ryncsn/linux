@@ -941,11 +941,24 @@ enum folio_references {
  * upon eviction, the rmap lookaround, and file descriptors
  * (folio_mark_accessed).
  *
- * Page table accesses escalate a folio in two steps.  The first access
- * only bumps refs, or advances the folio one generation if it is in the
- * oldest one; a second access sends it to the newest
- * generation.  Executable file folios skip the first step and are promoted
- * immediately, as reclaiming them causes IO thrashing.
+ * Page table accesses escalate a folio in two steps, like the second chance
+ * of the classical inactive list:
+ *
+ * 1. The first access sets LRU_REFS_REFERENCED.  A folio in the oldest
+ *    generation also moves to the head of the second oldest one; a folio in
+ *    a younger generation stays, and is checked again by the rmap walk once
+ *    it becomes the oldest.  If that check finds the first access, the folio
+ *    is already isolated, so it is put back outside the oldest generation
+ *    instead, see evict_folios().
+ *
+ * 2. A second access, counting refs from any source, sends the folio to the
+ *    newest generation.
+ *
+ * Executable file folios are promoted on their first access, as reclaiming
+ * them causes IO thrashing.  The walks only update the generation in
+ * folio->flags; sort_folio() or inc_min_seq() moves the folio to the head of
+ * that generation later.  Young PTEs found while unmapping (e.g., zap) go
+ * through folio_mark_accessed() and follow the file descriptor rules below.
  *
  * File descriptor accesses do not promote.  They only defer eviction from
  * the oldest generation, and only once the folio is a workingset folio
@@ -1148,7 +1161,7 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
  *
  * Increments the refs count (capped at LRU_REFS_PROTECTED).  Returns true
  * if the caller should activate the folio (second access or
- * executable), false to keep it in the eviction list.
+ * executable), false to put it back for a second chance.
  */
 static bool folio_inc_lru_refs_isolated(struct folio *folio, const vma_flags_t *vma_flags)
 {
@@ -5281,10 +5294,11 @@ retry:
 		}
 
 		/*
-		 * See the comments on LRU_REFS_FLAGS.
-		 *
 		 * The rejected folios are never added to the oldest generation,
 		 * so this effectively promotes them by at least one generation.
+		 * PG_active is the only placement hint here, so a folio kept on
+		 * its first page table access lands in the second newest one.
+		 * See "Referenced count feedback" above.
 		 */
 		__folio_set_lru_refs(folio, min(folio_lru_refs(folio), LRU_REFS_WORKINGSET));
 		if (lru_gen_folio_seq(lruvec, folio, false) == min_seq[type])
