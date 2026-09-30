@@ -6996,6 +6996,45 @@ void mem_cgroup_calculate_protection(struct mem_cgroup *root,
 			atomic_long_read(&parent->memory.children_low_usage)));
 }
 
+#ifdef CONFIG_LRU_GEN
+/**
+ * mem_cgroup_calculate_protection_path - compute protection along a path
+ * @root: the top ancestor of the sub-tree being checked (NULL for root_mem_cgroup)
+ * @memcg: the target memory cgroup
+ *
+ * Walk the ancestor path from @root down to @memcg and compute the effective
+ * protection at each level.  This is safe for isolated queries because it
+ * ensures parents are computed before children.
+ *
+ * 6.1 adaptation: mem_cgroup_calculate_protection() computes a single level
+ * using the parent's stored effective values, so collect the path first and
+ * then compute it top-down (parents before children).
+ */
+void mem_cgroup_calculate_protection_path(struct mem_cgroup *root,
+					  struct mem_cgroup *memcg)
+{
+	struct mem_cgroup *path[16];
+	int depth = 0, i;
+
+	if (mem_cgroup_disabled())
+		return;
+
+	if (!root)
+		root = root_mem_cgroup;
+
+	if (memcg == root)
+		return;
+
+	while (memcg && memcg != root && depth < ARRAY_SIZE(path)) {
+		path[depth++] = memcg;
+		memcg = parent_mem_cgroup(memcg);
+	}
+
+	for (i = depth - 1; i >= 0; i--)
+		mem_cgroup_calculate_protection(root, path[i]);
+}
+#endif /* CONFIG_LRU_GEN */
+
 static int charge_memcg(struct folio *folio, struct mem_cgroup *memcg,
 			gfp_t gfp)
 {
