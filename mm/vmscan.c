@@ -1316,7 +1316,8 @@ void folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
 			/* Promote second page table access or executable */
 			if (refs > LRU_REFS_REFERENCED || is_exec)
 				new_gen = max_gen;
-			else
+			/* First access only defers eviction from the oldest gen */
+			else if (gen == min_gen)
 				new_gen = (gen + 1UL) % MAX_NR_GENS;
 			refs = min_t(unsigned int, refs, LRU_REFS_PROTECTED);
 		} else if (refs > LRU_REFS_MAX) {
@@ -1333,6 +1334,8 @@ out:
 		lru_refs_set_flags(&new_flags, refs);
 		if (new_gen >= 0)
 			lru_gen_set_flags(&new_flags, new_gen);
+		if (new_flags == old_flags)
+			break;
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
 	if (new_gen != gen) {
@@ -3762,13 +3765,15 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 {
 	unsigned long new_flags, old_flags = READ_ONCE(*folio_flags(folio, 0));
 	unsigned long max_seq = READ_ONCE(lruvec->lrugen.max_seq);
-	int refs, old_gen, max_gen;
+	int refs, old_gen, min_gen, max_gen;
 
 	max_gen = lru_gen_from_seq(max_seq);
 
 	do {
 		old_gen = lru_gen_from_flags(old_flags);
 		refs = lru_refs_from_flags(old_flags) + 1;
+		*type = folio_flags_is_file_lru(&old_flags);
+		min_gen = lru_gen_from_seq(READ_ONCE(lruvec->lrugen.min_seq[*type]));
 		new_flags = old_flags;
 
 		if (old_gen >= 0 && old_gen != max_gen) {
@@ -3776,8 +3781,11 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 			/* Promote second page table access or executable */
 			if (refs > LRU_REFS_REFERENCED || is_exec_file_folio(folio, vm_flags))
 				*new_gen = max_gen;
-			else
+			/* First access only defers eviction from the oldest gen */
+			else if (old_gen == min_gen)
 				*new_gen = (old_gen + 1) % MAX_NR_GENS;
+			else
+				*new_gen = old_gen;
 			lru_gen_set_flags(&new_flags, *new_gen);
 			lru_refs_set_flags(&new_flags, *new_refs);
 		} else {
@@ -3785,9 +3793,10 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 			*new_refs = min_t(unsigned int, refs, LRU_REFS_MAX);
 			lru_refs_set_flags(&new_flags, *new_refs);
 		}
+		if (new_flags == old_flags)
+			break;
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
-	*type = folio_flags_is_file_lru(&old_flags);
 	*old_refs = lru_refs_from_flags(old_flags);
 
 	return old_gen;
