@@ -1345,8 +1345,8 @@ void folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
 	old_flags = READ_ONCE(*folio_flags(folio, 0));
 	do {
 		new_flags = old_flags;
-		gen = lru_gen_from_flags(old_flags);
-		old_refs = lru_refs_from_flags(old_flags);
+		gen = lru_get_gen_flags(old_flags);
+		old_refs = lru_get_refs_flags(old_flags);
 		type = folio_flags_is_file_lru(&old_flags);
 		refs = old_refs + 1;
 		new_gen = gen;
@@ -1378,9 +1378,9 @@ void folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
 		}
 out:
 		refs = min_t(unsigned int, refs, LRU_REFS_MAX);
-		lru_refs_set_flags(&new_flags, refs);
+		lru_set_refs_flags(&new_flags, refs);
 		if (new_gen >= 0)
-			lru_gen_set_flags(&new_flags, new_gen);
+			lru_set_gen_flags(&new_flags, new_gen);
 		if (new_flags == old_flags)
 			break;
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
@@ -1426,12 +1426,12 @@ bool folio_reset_lru_refs(struct folio *folio)
 	old_flags = READ_ONCE(*folio_flags(folio, 0));
 	do {
 		new_flags = old_flags;
-		refs = lru_refs_from_flags(old_flags);
+		refs = lru_get_refs_flags(old_flags);
 		type = folio_flags_is_file_lru(&old_flags);
-		gen = lru_gen_from_flags(old_flags);
+		gen = lru_get_gen_flags(old_flags);
 		if (!refs)
 			break;
-		lru_refs_set_flags(&new_flags, 0);
+		lru_set_refs_flags(&new_flags, 0);
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
 	if (gen >= 0) {
@@ -1468,8 +1468,8 @@ static bool folio_inc_lru_refs_isolated(struct folio *folio, unsigned long vm_fl
 
 	do {
 		new_flags = old_flags;
-		refs = lru_refs_from_flags(old_flags) + 1;
-		lru_refs_set_flags(&new_flags, min_t(unsigned int, refs, LRU_REFS_PROTECTED));
+		refs = lru_get_refs_flags(old_flags) + 1;
+		lru_set_refs_flags(&new_flags, min_t(unsigned int, refs, LRU_REFS_PROTECTED));
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
 	/* Promote second page table access or executable */
@@ -3824,8 +3824,8 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 	max_gen = lru_gen_from_seq(max_seq);
 
 	do {
-		old_gen = lru_gen_from_flags(old_flags);
-		refs = lru_refs_from_flags(old_flags) + 1;
+		old_gen = lru_get_gen_flags(old_flags);
+		refs = lru_get_refs_flags(old_flags) + 1;
 		*type = folio_flags_is_file_lru(&old_flags);
 		min_gen = lru_gen_from_seq(READ_ONCE(lruvec->lrugen.min_seq[*type]));
 		new_flags = old_flags;
@@ -3840,18 +3840,18 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 				*new_gen = (old_gen + 1) % MAX_NR_GENS;
 			else
 				*new_gen = old_gen;
-			lru_gen_set_flags(&new_flags, *new_gen);
-			lru_refs_set_flags(&new_flags, *new_refs);
+			lru_set_gen_flags(&new_flags, *new_gen);
+			lru_set_refs_flags(&new_flags, *new_refs);
 		} else {
 			*new_gen = old_gen;
 			*new_refs = min_t(unsigned int, refs, LRU_REFS_MAX);
-			lru_refs_set_flags(&new_flags, *new_refs);
+			lru_set_refs_flags(&new_flags, *new_refs);
 		}
 		if (new_flags == old_flags)
 			break;
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
-	*old_refs = lru_refs_from_flags(old_flags);
+	*old_refs = lru_get_refs_flags(old_flags);
 
 	return old_gen;
 }
@@ -3864,7 +3864,7 @@ static int __folio_inc_gen(struct lruvec *lruvec, struct folio *folio,
 	int file, refs, old_refs, new_gen;
 
 	do {
-		new_gen = lru_gen_from_flags(old_flags);
+		new_gen = lru_get_gen_flags(old_flags);
 
 		/* folio_inc_lru_refs() has promoted this page? */
 		if (new_gen >= 0 && new_gen != old_gen) {
@@ -3875,11 +3875,11 @@ static int __folio_inc_gen(struct lruvec *lruvec, struct folio *folio,
 
 		new_flags = old_flags;
 		new_gen = (old_gen + 1) % MAX_NR_GENS;
-		old_refs = lru_refs_from_flags(old_flags);
+		old_refs = lru_get_refs_flags(old_flags);
 		file = folio_flags_is_file_lru(&old_flags);
 		refs = min_t(unsigned int, old_refs, LRU_REFS_WORKINGSET);
-		lru_gen_set_flags(&new_flags, new_gen);
-		lru_refs_set_flags(&new_flags, refs);
+		lru_set_gen_flags(&new_flags, new_gen);
+		lru_set_refs_flags(&new_flags, refs);
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
 	/* Refs capped below PROTECTED: demote if previously active. */
