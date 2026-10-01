@@ -2733,6 +2733,11 @@ unsigned long reclaim_pages(struct list_head *page_list)
 
 		if (nid == page_to_nid(page)) {
 			ClearPageActive(page);
+			/* Drop the recency but keep the workingset, like classical LRU */
+			if (lru_gen_enabled())
+				__folio_set_lru_refs(page_folio(page),
+						     folio_is_workingset(page_folio(page)) ?
+						     LRU_REFS_WORKINGSET : 0);
 			list_move(&page->lru, &node_page_list);
 			continue;
 		}

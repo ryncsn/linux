@@ -326,14 +326,16 @@ static void madvise_cold_or_pageout_prep_folio(struct folio *folio)
 	test_and_clear_page_young((struct page *)folio);
 
 	/*
-	 * MGLRU clears all reference flags in folio_deactivate,
-	 * no need to touch it here.
+	 * MGLRU keeps this history in the refs count. MADV_COLD resets
+	 * it in folio_deactivate(), MADV_PAGEOUT trims it in
+	 * reclaim_pages() once the folio is isolated.
 	 */
-	if (!lru_gen_enabled()) {
-		folio_clear_referenced_by_bit(folio);
-		if (folio_test_active(folio))
-			folio_mark_workingset_by_bit(folio);
-	}
+	if (lru_gen_enabled())
+		return;
+
+	folio_clear_referenced_by_bit(folio);
+	if (folio_test_active(folio))
+		folio_mark_workingset_by_bit(folio);
 }
 
 static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
