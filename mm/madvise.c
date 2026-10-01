@@ -341,6 +341,43 @@ static inline bool can_do_file_pageout(struct vm_area_struct *vma)
 	       file_permission(vma->vm_file, MAY_WRITE) == 0;
 }
 
+static void madvise_cold_prep_folio(struct folio *folio)
+{
+	/*
+	 * VM couldn't reclaim the folio unless we clear PG_young.
+	 * As a side effect, it makes confuse idle-page tracking
+	 * because they will miss recent referenced history.
+	 */
+	folio_test_clear_young(folio);
+
+	/*
+	 * For the active/inactive LRU, a folio demoted out of the active
+	 * list should have PG_workingset so its refault is still accounted
+	 * as a workingset refault, and the referenced bit always needs to
+	 * be cleared even for inactive folios. Nothing to do for MGLRU as
+	 * folio_deactivate() always calls lru_gen_clear_refs().
+	 */
+	if (!lru_gen_enabled()) {
+		folio_clear_referenced(folio);
+		if (folio_test_active(folio))
+			folio_set_workingset(folio);
+	}
+}
+
+static void madvise_pageout_prep_folio(struct folio *folio)
+{
+	int refs = folio_lru_refs(folio);
+
+	/*
+	 * For MGLRU, cap the count at LRU_REFS_WORKINGSET: MADV is
+	 * suggesting the folio is actually cold, so the eviction shadow
+	 * should not record its hotness in the high tier counters, but
+	 * the workingset classification is preserved for PSI.
+	 */
+	if (lru_gen_enabled())
+		folio_set_lru_refs(folio, refs >= LRU_REFS_WORKINGSET ? LRU_REFS_WORKINGSET : 0);
+}
+
 static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
 				unsigned long addr, unsigned long end,
 				struct mm_walk *walk)
@@ -415,10 +452,10 @@ static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
 		}
 
 		trace_android_vh_madvise_cold_or_pageout_page(pageout, page);
-		ClearPageReferenced(page);
-		test_and_clear_page_young(page);
+		madvise_cold_prep_folio(page_folio(page));
 		if (pageout) {
 			if (!isolate_lru_page(page)) {
+				madvise_pageout_prep_folio(page_folio(page));
 				if (PageUnevictable(page))
 					putback_lru_page(page);
 				else
@@ -516,17 +553,11 @@ regular_page:
 			tlb_remove_tlb_entry(tlb, pte, addr);
 		}
 
-		/*
-		 * We are deactivating a page for accelerating reclaiming.
-		 * VM couldn't reclaim the page unless we clear PG_young.
-		 * As a side effect, it makes confuse idle-page tracking
-		 * because they will miss recent referenced history.
-		 */
 		trace_android_vh_madvise_cold_or_pageout_page(pageout, page);
-		ClearPageReferenced(page);
-		test_and_clear_page_young(page);
+		madvise_cold_prep_folio(page_folio(page));
 		if (pageout) {
 			if (!isolate_lru_page(page)) {
+				madvise_pageout_prep_folio(page_folio(page));
 				if (PageUnevictable(page))
 					putback_lru_page(page);
 				else
