@@ -211,7 +211,7 @@ static unsigned long damon_pa_pageout(struct damon_region *r)
 		 * so the hotness can be, and better be dropped.
 		 */
 		if (lru_gen_enabled())
-			folio_set_lru_refs(page_folio(page), 0);
+			folio_reset_lru_refs(page_folio(page));
 		else
 			folio_clear_referenced(page_folio(page));
 		test_and_clear_page_young(page);
@@ -223,8 +223,7 @@ static unsigned long damon_pa_pageout(struct damon_region *r)
 			putback_lru_page(page);
 		else
 			list_add(&page->lru, &page_list);
-		put_page(page);
-	}
+		put_page(page);	}
 	applied = reclaim_pages(&page_list);
 	cond_resched();
 	return applied * PAGE_SIZE;
