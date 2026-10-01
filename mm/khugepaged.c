@@ -528,8 +528,7 @@ static bool is_refcount_suitable(struct page *page)
 	if (PageSwapCache(page))
 		expected_refcount += compound_nr(page);
 
-	return page_count(page) == expected_refcount;
-}
+	return page_count(page) == expected_refcount;}
 
 static int __collapse_huge_page_isolate(struct vm_area_struct *vma,
 					unsigned long address,
