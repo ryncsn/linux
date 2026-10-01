@@ -425,7 +425,8 @@ static void __lru_cache_activate_folio(struct folio *folio)
 
 /**
  * folio_mark_accessed - Mark a folio as having seen activity.
- * @folio: The folio to mark. *
+ * @folio: The folio to mark.
+ *
  * inactive,unreferenced	->	inactive,referenced
  * inactive,referenced		->	active,unreferenced
  * active,unreferenced		->	active,referenced
