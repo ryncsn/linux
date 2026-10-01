@@ -1271,6 +1271,9 @@ enum page_references {
 };
 
 #ifdef CONFIG_LRU_GEN
+/******************************************************************************
+ *                     Referenced count feedback
+ ******************************************************************************/
 
 static inline bool is_exec_file_folio(struct folio *folio, unsigned long vm_flags)
 {
@@ -1278,9 +1281,53 @@ static inline bool is_exec_file_folio(struct folio *folio, unsigned long vm_flag
 }
 
 /*
- * Update the folio's lru refs indicator without taking the folio lock,
- * isolation, or lruvec lock. Used by both page table access (@promote=true)
- * and by file access (@is_fault=false).
+ * The folio_inc_lru_refs{_*} helpers below collect the referenced info
+ * (hotness) from other parts, including the page table walker, the rmap walk
+ * upon eviction, the rmap lookaround, and file descriptors
+ * (folio_mark_accessed).
+ *
+ * Page table accesses escalate a folio in two steps, like the second chance
+ * of the classical inactive list:
+ *
+ * 1. The first access sets LRU_REFS_REFERENCED.  A folio in the oldest
+ *    generation also moves to the head of the second oldest one; a folio in
+ *    a younger generation stays, and is checked again by the rmap walk once
+ *    it becomes the oldest.  If that check finds the first access, the folio
+ *    is already isolated, so it is put back outside the oldest generation
+ *    instead, see evict_folios().
+ *
+ * 2. A second access, counting refs from any source, sends the folio to the
+ *    newest generation.
+ *
+ * Executable file folios are promoted on their first access, as reclaiming
+ * them causes IO thrashing.  The walks only update the generation in
+ * folio->flags; sort_folio() or inc_min_seq() moves the folio to the head of
+ * that generation later.  Young PTEs found while unmapping (e.g., zap) go
+ * through folio_mark_accessed() and follow the file descriptor rules below.
+ *
+ * File descriptor accesses do not promote.  They only defer eviction from
+ * the oldest generation, and only once the folio is a workingset folio
+ * (LRU_REFS_WORKINGSET), leaving the rest to PID protection.  Page table
+ * accesses are treated more generously because the accessed bit is sticky
+ * (it under-counts repeated accesses) and because a page fault is more
+ * costly than file descriptor I/O.
+ *
+ * PID protection operates on tier > 0 folios.  The one proactive promotion
+ * outside of it and the page table path is the overflow case where the
+ * referenced count exceeds LRU_REFS_MAX, which means the folio is hotter
+ * than everything else in its generation.
+ *
+ * Whenever a folio changes generation here its referenced count is capped at
+ * LRU_REFS_PROTECTED, so it starts at or below the protected tier regardless
+ * of its old-generation access history.  PID protection (folio_inc_gen) caps
+ * at LRU_REFS_WORKINGSET independently.
+ */
+
+/*
+ * Update the folio's lru refs indicator. The caller doesn't need to hold
+ * the folio lock, isolate the folio, or hold the lruvec lock. Used by both
+ * cache access (is_fault == false) and page table access (is_fault == true,
+ * optionally with is_exec).
  */
 void folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
 {
@@ -1364,7 +1411,7 @@ out:
 	rcu_read_unlock();
 }
 
-/**
+/*
  * Reset the folio's lru refs indicator. The caller doesn't need to hold
  * the folio lock, isolate the folio, or hold the lruvec lock.
  */
@@ -1407,10 +1454,12 @@ bool folio_reset_lru_refs(struct folio *folio)
 }
 
 /*
- * Update the folio's lru refs indicator while the folio is isolated. Only
- * used on mapped folio upon the final eviction, and folio is taken off the
- * LRU list (isolated). Folio will be promoted on second access, and that's
- * done by the caller when folio is returned to LRU.
+ * Update the lru refs indicator of an isolated folio, only used on
+ * mapped folios upon the final eviction.
+ *
+ * Increments the refs count (capped at LRU_REFS_PROTECTED).  Returns true
+ * if the caller should activate the folio (second access or
+ * executable), false to put it back for a second chance.
  */
 static bool folio_inc_lru_refs_isolated(struct folio *folio, unsigned long vm_flags)
 {
@@ -3668,9 +3717,9 @@ static bool iterate_mm_list_nowalk(struct lruvec *lruvec, unsigned long seq)
  * P term over the generations previously evicted, using the smoothing factor
  * 1/2; the D term isn't supported.
  *
- * The setpoint (SP) is always the first tier of one type; the process variable
- * (PV) is either any tier of the other type or any other tier of the same
- * type.
+ * To select a type, the setpoint (SP) is all tiers of one type and the process
+ * variable (PV) is all tiers of the other type.  To select a tier to protect,
+ * the SP is the tiers below it and the PV is the tier itself.
  *
  * The error is the difference between the SP and the PV; the correction is to
  * turn off protection when SP>PV or turn on protection when SP<PV.
@@ -3849,6 +3898,10 @@ static int __folio_inc_gen(struct lruvec *lruvec, struct folio *folio,
 	return new_gen;
 }
 
+/*
+ * Force bump a folio's generation. Used for PID protection or to skip a
+ * folio from a zone ineligible for the current reclaim.
+ */
 static int folio_inc_gen(struct lruvec *lruvec, struct folio *folio)
 {
 	bool gen_increased;
@@ -5442,7 +5495,13 @@ retry:
 			continue;
 		}
 
-		/* Reset folio's refs before return */
+		/*
+		 * The rejected folios are never added to the oldest generation,
+		 * so this effectively promotes them by at least one generation.
+		 * PG_active is the only placement hint here, so a folio kept on
+		 * its first page table access lands in the second newest one.
+		 * See "Referenced count feedback" above.
+		 */
 		__folio_set_lru_refs(folio, min(folio_lru_refs(folio), LRU_REFS_WORKINGSET));
 		if (lru_gen_folio_seq(lruvec, folio, false) == min_seq[type])
 			folio_set_active(folio);

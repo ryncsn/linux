@@ -351,6 +351,12 @@ enum lruvec_flags {
  * are less important and should be evicted faster. Readahead (PG_readahead)
  * or reclaiming (PG_reclaim) folios are force put in tier 0.
  *
+ * Freshly allocated folios start with refs == 0; faulted and mapped folios
+ * have their page table access bit set, so the first page table access check
+ * always sets LRU_REFS_REFERENCED. That is the second chance described above
+ * MIN_NR_GENS: it only moves the folio one generation forward if it is in
+ * the oldest generation.
+ *
  * 2. Folios accessed at least once are still on tier 0:
  * (folio_lru_refs(folio) == LRU_REFS_REFERENCED == 1).
  * One time usage doesn't make the folio qualified to be protected in anyway.
