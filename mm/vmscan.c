@@ -1639,16 +1639,8 @@ void folio_inc_lru_refs(struct folio *folio, unsigned int flags)
 		gen = old_gen;
 		if (old_gen < 0)
 			goto out;
-		/*
-		 * Lock the lruvec if the folio is on-list. We are already
-		 * doing lazy promotion so in theory we don't need this,
-		 * but for now, concurrent aging would still corrupt the
-		 * size counters.  This is a temporary limitation and
-		 * will be lifted very soon, so the lock here is not a
-		 * performance concern.
-		 */
 		if (!lruvec) {
-			lruvec = folio_lruvec_lock_irq(folio);
+			lruvec = folio_lruvec(folio);
 			lrugen = &lruvec->lrugen;
 		}
 		max_seq = READ_ONCE(lrugen->max_seq);
@@ -1680,9 +1672,19 @@ out:
 			lru_set_gen_flags(&new_flags, gen);
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
-	if (gen != old_gen)
+	if (gen != old_gen) {
 		lru_gen_update_size(lruvec, folio, old_gen, gen);
-	if (lru_refs_is_active(old_refs) != lru_refs_is_active(refs) && old_gen >= 0) {
+		/*
+		 * Gen can only go forward while on list, so concurrent aging
+		 * is fine, except when multiple aging increase max_seq cross
+		 * the sliding window border causing hotness inversion. In that
+		 * very unlikely case, just activate the folio.
+		 */
+		if (unlikely(READ_ONCE(lrugen->max_seq) - max_seq > MIN_NR_GENS))
+			folio_activate(folio);
+	}
+
+	if (lru_refs_is_active(old_refs) != lru_refs_is_active(refs) && gen >= 0) {
 		enum lru_list lru = file * LRU_INACTIVE_FILE;
 
 		__update_lru_size(lruvec, lru + lru_refs_is_active(old_refs),
@@ -1690,8 +1692,6 @@ out:
 		__update_lru_size(lruvec, lru + lru_refs_is_active(refs),
 				  folio_zonenum(folio), nr_pages);
 	}
-	if (lruvec)
-		unlock_page_lruvec_irq(lruvec);
 }
 
 /**
