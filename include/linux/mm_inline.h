@@ -175,7 +175,7 @@ static inline int lru_get_refs_flags(unsigned long flags)
 {
 	int refs;
 
-	/* Return the total number of accesses. See the comment on LRU_REFS_FLAGS. */
+	/* Return the total number of accesses. See the comment above MAX_NR_TIERS. */
 	refs = (flags & BIT(PG_referenced)) ? BIT(0) : 0;
 	refs += (flags & BIT(PG_workingset)) ? BIT(1) : 0;
 	refs += ((flags & LRU_REFS_MASK) >> LRU_REFS_PGOFF) << 2;
@@ -358,6 +358,10 @@ static inline unsigned long lru_gen_folio_seq(struct lruvec *lruvec, struct foli
 		gen = MIN_NR_GENS - (refs >= LRU_REFS_WORKINGSET);
 	else if (reclaiming)
 		gen = MAX_NR_GENS;
+	/*
+	 * Swap backed folios without a swap slot are costly to evict and
+	 * often freed by their owner before reclaim gets to them.
+	 */
 	else if ((!folio_is_file_lru(folio) && !folio_test_swapcache(folio)) ||
 		 (folio_test_reclaim(folio) &&
 		  (folio_test_dirty(folio) || folio_test_writeback(folio))))

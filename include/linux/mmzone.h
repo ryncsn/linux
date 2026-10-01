@@ -392,11 +392,11 @@ enum lruvec_flags {
  * 1. Tier is fls(N-1) for N > 1, 0 otherwise.  Folios with zero
  *    accesses (refs == 0) are generally cold, e.g. readahead folios.
  *
- *    Page table access advances a folio by one generation even at the
- *    lowest refs or tier.  Freshly allocated folios start with refs == 0;
- *    faulted and mapped folios have their page table access bit set, so
- *    the first page table access check always sets LRU_REFS_REFERENCED and
- *    moves them one generation forward, driving aging and workingset shift.
+ *    Freshly allocated folios start with refs == 0; faulted and mapped
+ *    folios have their page table access bit set, so the first page table
+ *    access check always sets LRU_REFS_REFERENCED.  That is the second
+ *    chance described above MIN_NR_GENS: it only moves the folio one
+ *    generation forward if it is in the oldest generation.
  *
  * 2. Folios accessed once stay on tier 0: one-time usage does not
  *    qualify for protection.  A second access advances the folio,
