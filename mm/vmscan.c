@@ -1642,30 +1642,35 @@ void folio_inc_lru_refs(struct folio *folio, unsigned int flags)
 	long nr_pages = folio_nr_pages(folio);
 	struct lru_gen_folio *lrugen;
 	struct lruvec *lruvec = NULL;
+	bool aged = false;
 
+retry:
 	old_flags = READ_ONCE(*folio_flags(folio, 0));
 	do {
 		new_flags = old_flags;
 		old_gen = lru_get_gen_flags(old_flags);
 		old_refs = lru_get_refs_flags(old_flags);
-		file = folio_flags_is_file_lru(&old_flags);
 		refs = old_refs + 1;
 		gen = old_gen;
+		file = folio_flags_is_file_lru(&old_flags);
 		if (old_gen < 0)
 			goto out;
 		if (!lruvec) {
 			lruvec = folio_lruvec(folio);
 			lrugen = &lruvec->lrugen;
 		}
+		/* Order old_flags before max_seq, also after a failed cmpxchg(). */
+		smp_rmb();
 		max_seq = READ_ONCE(lrugen->max_seq);
 		max_gen = lru_gen_from_seq(max_seq);
 		min_gen = lru_gen_from_seq(READ_ONCE(lrugen->min_seq[file]));
 		if (old_gen == max_gen)
 			goto out;
 
-		if (flags & (LRU_REF_MAPPED | LRU_REF_EXEC)) {
-			/* Promote second page table access or executable */
-			if (refs > LRU_REFS_REFERENCED || flags & LRU_REF_EXEC)
+		if (flags & (LRU_REF_MAPPED | LRU_REF_EXEC | LRU_REF_FORCE)) {
+			/* Promote repeated accesses, exec mappings or aging retries. */
+			if (refs > LRU_REFS_REFERENCED ||
+			    flags & (LRU_REF_EXEC | LRU_REF_FORCE))
 				gen = max_gen;
 			/* First access only defers eviction from the oldest gen */
 			else if (old_gen == min_gen)
@@ -1690,15 +1695,16 @@ out:
 	} while (!try_cmpxchg(folio_flags(folio, 0), &old_flags, new_flags));
 
 	if (gen != old_gen) {
-		lru_gen_update_size(lruvec, folio, old_gen, gen);
 		/*
-		 * Gen can only go forward while on list, so concurrent aging
-		 * is fine, except when multiple aging increase max_seq cross
-		 * the sliding window border causing hotness inversion. In that
-		 * very unlikely case, just activate the folio.
+		 * Gen-index reuse can hide aging from cmpxchg(). Account this
+		 * update before retrying at the newest gen. An extra reference
+		 * is acceptable to avoid folio_activate()'s LRU lock latency.
 		 */
-		if (unlikely(READ_ONCE(lrugen->max_seq) - max_seq > MIN_NR_GENS))
-			folio_activate(folio);
+		if (unlikely(READ_ONCE(lrugen->max_seq) != max_seq)) {
+			flags = LRU_REF_FORCE;
+			aged = true;
+		}
+		lru_gen_update_size(lruvec, folio, old_gen, gen);
 	}
 
 	if (lru_refs_is_active(old_refs) != lru_refs_is_active(refs) && gen >= 0) {
@@ -1708,6 +1714,10 @@ out:
 				  folio_zonenum(folio), -nr_pages);
 		__update_lru_size(lruvec, lru + lru_refs_is_active(refs),
 				  folio_zonenum(folio), nr_pages);
+	}
+	if (aged) {
+		aged = false;
+		goto retry;
 	}
 }
 
