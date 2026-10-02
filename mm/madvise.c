@@ -315,27 +315,42 @@ static long madvise_willneed(struct vm_area_struct *vma,
 	return 0;
 }
 
-/*
- * We are deactivating a folio for accelerating reclaiming.
- * VM couldn't reclaim the folio unless we clear PG_young.
- * As a side effect, it makes confuse idle-page tracking
- * because they will miss recent referenced history.
- */
-static void madvise_cold_or_pageout_prep_folio(struct folio *folio)
+static void madvise_cold_prep_folio(struct folio *folio)
 {
+	/*
+	 * VM couldn't reclaim the folio unless we clear PG_young.
+	 * As a side effect, it makes confuse idle-page tracking
+	 * because they will miss recent referenced history.
+	 */
 	test_and_clear_page_young((struct page *)folio);
 
 	/*
-	 * MGLRU keeps this history in the refs count. MADV_COLD resets
-	 * it in folio_deactivate(), MADV_PAGEOUT trims it in
-	 * reclaim_pages() once the folio is isolated.
+	 * For the active/inactive LRU, a folio demoted out of the active
+	 * list should have PG_workingset so its refault is still accounted
+	 * as a workingset refault, and the referenced bit always needs to
+	 * be cleared even for inactive folios. Nothing to do for MGLRU as
+	 * deactivate_page() resets the refs count via folio_reset_lru_refs().
+	 */
+	if (!lru_gen_enabled()) {
+		folio_clear_referenced_by_bit(folio);
+		if (folio_test_active(folio))
+			folio_mark_workingset_by_bit(folio);
+	}
+}
+
+static void madvise_pageout_prep_folio(struct folio *folio)
+{
+	int refs = folio_lru_refs(folio);
+
+	/*
+	 * For MGLRU, cap the count at LRU_REFS_WORKINGSET: MADV is
+	 * suggesting the folio is actually cold, so the eviction shadow
+	 * should not record its hotness in the high tier counters, but
+	 * the workingset classification is preserved for PSI.
 	 */
 	if (lru_gen_enabled())
-		return;
-
-	folio_clear_referenced_by_bit(folio);
-	if (folio_test_active(folio))
-		folio_mark_workingset_by_bit(folio);
+		__folio_set_lru_refs(folio, refs >= LRU_REFS_WORKINGSET ?
+				     LRU_REFS_WORKINGSET : 0);
 }
 
 static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
@@ -412,9 +427,10 @@ static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
 			tlb_remove_pmd_tlb_entry(tlb, pmd, addr);
 		}
 
-		madvise_cold_or_pageout_prep_folio(page_folio(page));
+		madvise_cold_prep_folio(page_folio(page));
 		if (pageout) {
 			if (!isolate_lru_page(page)) {
+				madvise_pageout_prep_folio(page_folio(page));
 				if (PageUnevictable(page))
 					putback_lru_page(page);
 				else
@@ -503,15 +519,10 @@ regular_page:
 			tlb_remove_tlb_entry(tlb, pte, addr);
 		}
 
-		/*
-		 * We are deactivating a page for accelerating reclaiming.
-		 * VM couldn't reclaim the page unless we clear PG_young.
-		 * As a side effect, it makes confuse idle-page tracking
-		 * because they will miss recent referenced history.
-		 */
-		madvise_cold_or_pageout_prep_folio(page_folio(page));
+		madvise_cold_prep_folio(page_folio(page));
 		if (pageout) {
 			if (!isolate_lru_page(page)) {
+				madvise_pageout_prep_folio(page_folio(page));
 				if (PageUnevictable(page))
 					putback_lru_page(page);
 				else
