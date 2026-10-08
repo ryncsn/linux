@@ -419,9 +419,9 @@ enum lruvec_flags {
  *    accuracy, and caps higher refs to this value.  Since PID protection
  *    bypasses page table lookup and clearing, when a further eviction
  *    attempt occurs after PID loosens, the folio's page table access is
- *    rechecked and the folio is sent back to LRU_REFS_PROTECTED.  This
- *    also gives folios a fair opportunity to be promoted by file access
- *    again.
+ *    rechecked and a referenced folio is put back with refs capped to
+ *    this value as well.  This also gives folios a fair opportunity to be
+ *    promoted by file access again.
  *
  *    Folios refaulted through a page fault at tier 1 or above are activated
  *    and enter the newest gen. Non fault page will enter second oldest gen,

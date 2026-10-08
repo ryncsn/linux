@@ -315,6 +315,13 @@ static inline int folio_lru_gen(const struct folio *folio)
 	return lru_get_gen_flags(READ_ONCE(folio->flags));
 }
 
+static inline bool lru_gen_is_old(unsigned long max_seq, int gen)
+{
+	VM_WARN_ON_ONCE(gen >= MAX_NR_GENS);
+	/* see the comment on MIN_NR_GENS */
+	return gen == lru_gen_from_seq(max_seq) || gen == lru_gen_from_seq(max_seq - 1);
+}
+
 static inline void lru_gen_update_size(struct lruvec *lruvec, struct folio *folio,
 				       int old_gen, int new_gen)
 {
@@ -358,10 +365,6 @@ static inline unsigned long lru_gen_folio_seq(struct lruvec *lruvec, struct foli
 		gen = MIN_NR_GENS - (refs >= LRU_REFS_WORKINGSET);
 	else if (reclaiming)
 		gen = MAX_NR_GENS;
-	/*
-	 * Swap backed folios without a swap slot are costly to evict and
-	 * often freed by their owner before reclaim gets to them.
-	 */
 	else if ((!folio_is_file_lru(folio) && !folio_test_swapcache(folio)) ||
 		 (folio_test_reclaim(folio) &&
 		  (folio_test_dirty(folio) || folio_test_writeback(folio))))
