@@ -1661,8 +1661,8 @@ retry:
 			if (refs > LRU_REFS_REFERENCED ||
 			    flags & (LRU_REF_EXEC | LRU_REF_FORCE))
 				gen = max_gen;
-			/* First access only defers eviction from the oldest gen */
-			else if (lru_gen_is_old(max_seq, gen))
+			/* First access only defers eviction of an old gen */
+			else if (lru_gen_is_old(max_seq, old_gen))
 				gen = (old_gen + 1) % MAX_NR_GENS;
 			refs = min(refs, LRU_REFS_PROTECTED);
 		} else if (refs > LRU_REFS_MAX) {
@@ -1769,15 +1769,15 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 				   int *old_refs, int *new_refs, int *type)
 {
 	unsigned long new_flags, old_flags = READ_ONCE(*folio_flags(folio, 0));
-	unsigned long max_seq = READ_ONCE(lruvec->lrugen.max_seq);
-	int refs, old_gen, min_gen, max_gen;
+	int refs, old_gen, max_gen;
+	unsigned long max_seq;
 
-	max_gen = lru_gen_from_seq(max_seq);
 	do {
+		max_seq = READ_ONCE(lruvec->lrugen.max_seq);
+		max_gen = lru_gen_from_seq(max_seq);
 		old_gen = lru_get_gen_flags(old_flags);
 		refs = lru_get_refs_flags(old_flags) + 1;
 		*type = folio_flags_is_file_lru(&old_flags);
-		min_gen = lru_gen_from_seq(READ_ONCE(lruvec->lrugen.min_seq[*type]));
 		new_flags = old_flags;
 
 		if (old_gen >= 0 && old_gen != max_gen) {
@@ -1785,7 +1785,7 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 			/* Promote second page table access or executable */
 			if (refs > LRU_REFS_REFERENCED || is_exec_file_folio(folio, vm_flags))
 				*new_gen = max_gen;
-			/* First access only defers eviction from the oldest gen */
+			/* First access only defers eviction of an old gen */
 			else if (lru_gen_is_old(max_seq, old_gen))
 				*new_gen = (old_gen + 1) % MAX_NR_GENS;
 			else

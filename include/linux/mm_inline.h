@@ -315,11 +315,15 @@ static inline int folio_lru_gen(const struct folio *folio)
 	return lru_get_gen_flags(READ_ONCE(folio->flags));
 }
 
+/*
+ * A gen is old when it falls outside the aging's second chance: the
+ * MIN_NR_GENS newest generations, see the comment on MIN_NR_GENS.
+ */
 static inline bool lru_gen_is_old(unsigned long max_seq, int gen)
 {
-	VM_WARN_ON_ONCE(gen >= MAX_NR_GENS);
-	/* see the comment on MIN_NR_GENS */
-	return gen == lru_gen_from_seq(max_seq) || gen == lru_gen_from_seq(max_seq - 1);
+	VM_WARN_ON_ONCE(gen < 0 || gen >= MAX_NR_GENS);
+	return gen != lru_gen_from_seq(max_seq) &&
+	       gen != lru_gen_from_seq(max_seq - 1);
 }
 
 static inline void lru_gen_update_size(struct lruvec *lruvec, struct folio *folio,

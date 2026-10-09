@@ -395,8 +395,9 @@ enum lruvec_flags {
  *    Freshly allocated folios start with refs == 0; faulted and mapped
  *    folios have their page table access bit set, so the first page table
  *    access check always sets LRU_REFS_REFERENCED.  That is the second
- *    chance described above MIN_NR_GENS: it only moves the folio one
- *    generation forward if it is in the oldest generation.
+ *    chance described above MIN_NR_GENS: it moves the folio one
+ *    generation forward if it is in an old generation, i.e., not one
+ *    of the two newest generations.
  *
  * 2. Folios accessed once stay on tier 0: one-time usage does not
  *    qualify for protection.  A second access advances the folio,
