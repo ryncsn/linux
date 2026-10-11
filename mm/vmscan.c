@@ -1626,7 +1626,7 @@ enum folio_references {
  */
 void folio_inc_lru_refs(struct folio *folio, unsigned int flags)
 {
-	int max_gen, min_gen;
+	int max_gen;
 	int file, old_refs, refs, old_gen, gen;
 	unsigned long new_flags, old_flags, max_seq;
 	long nr_pages = folio_nr_pages(folio);
@@ -1653,7 +1653,6 @@ retry:
 		smp_rmb();
 		max_seq = READ_ONCE(lrugen->max_seq);
 		max_gen = lru_gen_from_seq(max_seq);
-		min_gen = lru_gen_from_seq(READ_ONCE(lrugen->min_seq[file]));
 		if (old_gen == max_gen)
 			goto out;
 
@@ -1662,14 +1661,14 @@ retry:
 			    flags & (LRU_REF_EXEC | LRU_REF_FORCE))
 				gen = max_gen;
 			/* First access only defers eviction of an old gen */
-			else if (lru_gen_is_old(max_seq, old_gen))
+			else if (lru_gen_at_tail(lruvec, file, old_gen))
 				gen = (old_gen + 1) % MAX_NR_GENS;
 			refs = min(refs, LRU_REFS_PROTECTED);
 		} else if (refs > LRU_REFS_MAX) {
 			/* LRU refs counting overflow, bump the gen */
 			gen = (old_gen + 1) % MAX_NR_GENS;
 			refs = LRU_REFS_PROTECTED;
-		} else if (old_gen == min_gen && refs >= LRU_REFS_WORKINGSET) {
+		} else if (lru_gen_at_tail(lruvec, file, old_gen) && refs >= LRU_REFS_WORKINGSET) {
 			/* Defer eviction of just accessed workingset */
 			gen = (old_gen + 1) % MAX_NR_GENS;
 			refs = min(refs, LRU_REFS_PROTECTED);
@@ -1786,7 +1785,7 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 			if (refs > LRU_REFS_REFERENCED || is_exec_file_folio(folio, vm_flags))
 				*new_gen = max_gen;
 			/* First access only defers eviction of an old gen */
-			else if (lru_gen_is_old(max_seq, old_gen))
+			else if (lru_gen_at_tail(lruvec, *type, old_gen))
 				*new_gen = (old_gen + 1) % MAX_NR_GENS;
 			else
 				*new_gen = old_gen;

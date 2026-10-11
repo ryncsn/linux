@@ -316,14 +316,17 @@ static inline int folio_lru_gen(const struct folio *folio)
 }
 
 /*
- * A gen is old when it falls outside the aging's second chance: the
- * MIN_NR_GENS newest generations, see the comment on MIN_NR_GENS.
+ * A folio is at the tail of its LRU when it is within MIN_NR_GENS of the
+ * oldest generation of its own type: those are the generations the eviction
+ * scans next.  The eviction advances min_seq[] per type, so the tail is a
+ * per-type property even though generations themselves are global.
  */
-static inline bool lru_gen_is_old(unsigned long max_seq, int gen)
+static inline bool lru_gen_at_tail(struct lruvec *lruvec, int type, int gen)
 {
-	VM_WARN_ON_ONCE(gen < 0 || gen >= MAX_NR_GENS);
-	return gen != lru_gen_from_seq(max_seq) &&
-	       gen != lru_gen_from_seq(max_seq - 1);
+	unsigned long min_seq = READ_ONCE(lruvec->lrugen.min_seq[type]);
+
+	return gen == lru_gen_from_seq(min_seq) ||
+	       gen == lru_gen_from_seq(min_seq + 1);
 }
 
 static inline void lru_gen_update_size(struct lruvec *lruvec, struct folio *folio,
