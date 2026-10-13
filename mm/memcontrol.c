@@ -1344,9 +1344,8 @@ EXPORT_SYMBOL_GPL(do_traversal_all_lruvec);
  * @zid: zone id of the accounted pages
  * @nr_pages: positive when adding or negative when removing
  *
- * This function must be called before a page is added * to or just after
- * a page is removed from an lru list. Caller need to protect the lruvec
- * with lock or RCU.
+ * This function must be called under lru_lock, just before a page is added
+ * to or just after a page is removed from an lru list.
  */
 void mem_cgroup_update_lru_size(struct lruvec *lruvec, enum lru_list lru,
 				int zid, int nr_pages)
