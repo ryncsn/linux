@@ -927,11 +927,9 @@ unsigned long mem_cgroup_get_zone_lru_size(struct lruvec *lruvec,
 {
 	long val;
 	struct mem_cgroup_per_node *mz;
-	atomic_long_t *lru_zone_size;
 
 	mz = container_of(lruvec, struct mem_cgroup_per_node, lruvec);
-	lru_zone_size = (void *)&mz->lru_zone_size[zone_idx][lru];
-	val = atomic_long_read(lru_zone_size);
+	val = READ_ONCE(mz->lru_zone_size[zone_idx][lru]);
 	if (WARN_ON_ONCE(val < 0))
 		return 0;
 
