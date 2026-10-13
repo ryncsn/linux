@@ -1363,8 +1363,8 @@ void folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
 			/* Promote second page table access or executable */
 			if (refs > LRU_REFS_REFERENCED || is_exec)
 				new_gen = max_gen;
-			/* First access only defers eviction from the oldest gen */
-			else if (gen == min_gen)
+			/* First access only defers eviction of a tail gen */
+			else if (lru_gen_at_tail(lruvec, type, gen))
 				new_gen = (gen + 1UL) % MAX_NR_GENS;
 			refs = min_t(unsigned int, refs, LRU_REFS_PROTECTED);
 		} else if (refs > LRU_REFS_MAX) {
@@ -3803,26 +3803,27 @@ static bool positive_ctrl_err(struct ctrl_pos *sp, struct ctrl_pos *pv)
  ******************************************************************************/
 
 /*
- * Update the folio's lru refs indicator during a page table walk. Only
- * collect access info from page table. min_seq or max_seq cannot change
- * since it is in the middle of the aging process. Return the old generation
- * and store the committed new generation when the folio is promoted.
+ * Update the folio's lru refs indicator during a page table walk or the
+ * look-around. max_seq can be stale as neither holds the LRU lock.
+ *
+ * Returns the old generation, or -1 if the folio is off the LRU list.
+ * Old LRU refs, and updated gen and LRU refs info by the successful
+ * cmpxchg are all stored by returning arguments.
  */
 static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 				   unsigned long vm_flags, int *new_gen,
 				   int *old_refs, int *new_refs, int *type)
 {
 	unsigned long new_flags, old_flags = READ_ONCE(*folio_flags(folio, 0));
-	unsigned long max_seq = READ_ONCE(lruvec->lrugen.max_seq);
-	int refs, old_gen, min_gen, max_gen;
-
-	max_gen = lru_gen_from_seq(max_seq);
+	int refs, old_gen, max_gen;
+	unsigned long max_seq;
 
 	do {
+		max_seq = READ_ONCE(lruvec->lrugen.max_seq);
+		max_gen = lru_gen_from_seq(max_seq);
 		old_gen = lru_get_gen_flags(old_flags);
 		refs = lru_get_refs_flags(old_flags) + 1;
 		*type = folio_flags_is_file_lru(&old_flags);
-		min_gen = lru_gen_from_seq(READ_ONCE(lruvec->lrugen.min_seq[*type]));
 		new_flags = old_flags;
 
 		if (old_gen >= 0 && old_gen != max_gen) {
@@ -3830,8 +3831,8 @@ static int folio_inc_lru_refs_walk(struct folio *folio, struct lruvec *lruvec,
 			/* Promote second page table access or executable */
 			if (refs > LRU_REFS_REFERENCED || is_exec_file_folio(folio, vm_flags))
 				*new_gen = max_gen;
-			/* First access only defers eviction from the oldest gen */
-			else if (old_gen == min_gen)
+			/* First access only defers eviction of a tail gen */
+			else if (lru_gen_at_tail(lruvec, *type, old_gen))
 				*new_gen = (old_gen + 1) % MAX_NR_GENS;
 			else
 				*new_gen = old_gen;

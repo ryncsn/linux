@@ -354,8 +354,8 @@ enum lruvec_flags {
  * Freshly allocated folios start with refs == 0; faulted and mapped folios
  * have their page table access bit set, so the first page table access check
  * always sets LRU_REFS_REFERENCED. That is the second chance described above
- * MIN_NR_GENS: it only moves the folio one generation forward if it is in
- * the oldest generation.
+ * MIN_NR_GENS: it moves the folio one generation forward if it is at the
+ * tail of its LRU, i.e., in one of the two oldest generations of its type.
  *
  * 2. Folios accessed at least once are still on tier 0:
  * (folio_lru_refs(folio) == LRU_REFS_REFERENCED == 1).
@@ -363,10 +363,11 @@ enum lruvec_flags {
  *
  * 3. Folios that are accessed more than once are considered workingset:
  * (folio_lru_refs(folio) == LRU_REFS_WORKINGSET == 2).
- * If a workingset folio is found in the oldest gen, it will be moved to
- * second oldest gen on access. Gen moving is lazily done without involving
- * LRU lock so it's cheap. It won't be promoted further if it's not on
- * oldest gen to avoid over-promoting of caches.
+ * If a workingset folio is found at the tail of its LRU, i.e., in one of
+ * the two oldest generations of its type, it will be moved one generation
+ * forward on access. Gen moving is lazily done without involving
+ * LRU lock so it's cheap. It won't be promoted further if it's not at
+ * the tail to avoid over-promoting of caches.
  *
  * 4. A folio qualified as workingset is still on tier 1 unless it
  * is accessed again. That makes the workingset still easily reclaimable, since

@@ -452,6 +452,19 @@ static inline int folio_lru_gen(const struct folio *folio)
 	return lru_get_gen_flags(READ_ONCE(*const_folio_flags(folio, 0)));
 }
 
+static inline bool lru_gen_at_tail(struct lruvec *lruvec, int type, int gen)
+{
+	unsigned long min_seq = READ_ONCE(lruvec->lrugen.min_seq[type]);
+
+	/*
+	 * Consider a folio is at the tail of its LRU when it is within
+	 * MIN_NR_GENS of the oldest generation of its own type
+	 */
+	BUILD_BUG_ON(MIN_NR_GENS != 2);
+	return gen == lru_gen_from_seq(min_seq) ||
+	       gen == lru_gen_from_seq(min_seq + 1);
+}
+
 static inline bool lru_refs_is_active(unsigned int refs)
 {
 	VM_WARN_ON_ONCE(refs > LRU_REFS_MAX);
