@@ -329,7 +329,8 @@ static void madvise_cold_prep_folio(struct folio *folio)
 	 * list should have PG_workingset so its refault is still accounted
 	 * as a workingset refault, and the referenced bit always needs to
 	 * be cleared even for inactive folios. Nothing to do for MGLRU as
-	 * deactivate_page() resets the refs count via folio_reset_lru_refs().
+	 * deactivate_page() clears the refs count through
+	 * folio_reset_lru_refs().
 	 */
 	if (!lru_gen_enabled()) {
 		folio_clear_referenced_by_bit(folio);
@@ -343,7 +344,8 @@ static void madvise_pageout_prep_folio(struct folio *folio)
 	int refs = folio_lru_refs(folio);
 
 	/*
-	 * For MGLRU, cap the count at LRU_REFS_WORKINGSET: MADV is
+	 * For MGLRU, drop the count below LRU_REFS_WORKINGSET and cap
+	 * the rest at it: MADV is
 	 * suggesting the folio is actually cold, so the eviction shadow
 	 * should not record its hotness in the high tier counters, but
 	 * the workingset classification is preserved for PSI.
@@ -442,6 +444,7 @@ huge_unlock:
 		spin_unlock(ptl);
 		if (pageout)
 			reclaim_pages(&page_list);
+		cond_resched();
 		return 0;
 	}
 
