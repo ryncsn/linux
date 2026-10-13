@@ -1286,31 +1286,21 @@ static inline bool is_exec_file_folio(struct folio *folio, unsigned long vm_flag
  * upon eviction, the rmap lookaround, and file descriptors
  * (folio_mark_accessed).
  *
- * Page table accesses escalate a folio in two steps, like the second chance
- * of the classical inactive list:
+ * Page table accesses use refs from either source. The first reference
+ * advances tail-gen folios by one generation; a second promotes to the
+ * newest. Executable file folios promote on their first access to avoid
+ * I/O thrashing. Isolated rmap accesses use evict_folios() for putback.
  *
- * 1. The first access sets LRU_REFS_REFERENCED.  A folio in the oldest
- *    generation also moves to the head of the second oldest one; a folio in
- *    a younger generation stays, and is checked again by the rmap walk once
- *    it becomes the oldest.  If that check finds the first access, the folio
- *    is already isolated, so it is put back outside the oldest generation
- *    instead, see evict_folios().
- *
- * 2. A second access, counting refs from any source, sends the folio to the
- *    newest generation.
- *
- * Executable file folios are promoted on their first access, as reclaiming
- * them causes IO thrashing.  The walks only update the generation in
- * folio->flags; sort_folio() or inc_min_seq() moves the folio to the head of
- * that generation later.  Young PTEs found while unmapping (e.g., zap) go
- * through folio_mark_accessed() and follow the file descriptor rules below.
+ * Promotion changes folio->flags; sort_folio() or inc_min_seq() moves the
+ * folio later. Young PTEs found during unmapping use folio_mark_accessed()
+ * and follow the file descriptor rules below.
  *
  * File descriptor accesses do not promote.  They only defer eviction from
- * the oldest generation, and only once the folio is a workingset folio
- * (LRU_REFS_WORKINGSET), leaving the rest to PID protection.  Page table
- * accesses are treated more generously because the accessed bit is sticky
- * (it under-counts repeated accesses) and because a page fault is more
- * costly than file descriptor I/O.
+ * the tail gens of their type, and only once the folio is a workingset
+ * folio (LRU_REFS_WORKINGSET), leaving the rest to PID protection.  Page
+ * table accesses are treated more generously because the accessed bit is
+ * sticky (it under-counts repeated accesses) and because a page fault is
+ * more costly than file descriptor I/O.
  *
  * PID protection operates on tier > 0 folios.  The one proactive promotion
  * outside of it and the page table path is the overflow case where the
@@ -1321,6 +1311,10 @@ static inline bool is_exec_file_folio(struct folio *folio, unsigned long vm_flag
  * LRU_REFS_PROTECTED, so it starts at or below the protected tier regardless
  * of its old-generation access history.  PID protection (folio_inc_gen) caps
  * at LRU_REFS_WORKINGSET independently.
+ *
+ * folio_inc_lru_refs() retries with a forced promotion if the aging
+ * recycled the gen index it was about to store: newest gen and an extra
+ * reference.
  */
 
 /*
@@ -1331,17 +1325,19 @@ static inline bool is_exec_file_folio(struct folio *folio, unsigned long vm_flag
  */
 void folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
 {
-	int max_gen, min_gen;
+	int max_gen;
 	int type, old_refs, refs, gen, new_gen;
 	unsigned long new_flags, old_flags, max_seq;
 	long nr_pages = folio_nr_pages(folio);
 	struct lru_gen_folio *lrugen;
 	struct lruvec *lruvec;
+	bool aged = false, force = false;
 
 	rcu_read_lock();
 	lruvec = folio_lruvec(folio);
 	lrugen = &lruvec->lrugen;
 
+retry:
 	old_flags = READ_ONCE(*folio_flags(folio, 0));
 	do {
 		new_flags = old_flags;
@@ -1353,15 +1349,16 @@ void folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
 		if (!(old_flags & BIT(PG_lru)) || gen < 0)
 			goto out;
 
+		/* Order old_flags before max_seq; a failed cmpxchg() is unordered */
+		smp_rmb();
 		max_seq = READ_ONCE(lrugen->max_seq);
 		max_gen = lru_gen_from_seq(max_seq);
-		min_gen = lru_gen_from_seq(READ_ONCE(lrugen->min_seq[type]));
 		if (gen == max_gen)
 			goto out;
 
-		if (is_fault || is_exec) {
+		if (is_fault || is_exec || force) {
 			/* Promote second page table access or executable */
-			if (refs > LRU_REFS_REFERENCED || is_exec)
+			if (refs > LRU_REFS_REFERENCED || is_exec || force)
 				new_gen = max_gen;
 			/* First access only defers eviction of a tail gen */
 			else if (lru_gen_at_tail(lruvec, type, gen))
@@ -1371,7 +1368,7 @@ void folio_inc_lru_refs(struct folio *folio, bool is_fault, bool is_exec)
 			/* LRU refs counting overflow, bump the gen */
 			new_gen = (gen + 1UL) % MAX_NR_GENS;
 			refs = LRU_REFS_PROTECTED;
-		} else if (gen == min_gen && refs >= LRU_REFS_WORKINGSET) {
+		} else if (lru_gen_at_tail(lruvec, type, gen) && refs >= LRU_REFS_WORKINGSET) {
 			/* Defer eviction of just accessed workingset */
 			new_gen = (gen + 1UL) % MAX_NR_GENS;
 			refs = min_t(unsigned int, refs, LRU_REFS_PROTECTED);
@@ -1387,16 +1384,14 @@ out:
 
 	if (new_gen != gen) {
 		/*
-		 * Gen can only go forward, so concurrent aging is
-		 * usually fine, except when multiple aging increase
-		 * max_seq multiple times, new_gen may have go beyond
-		 * the new max_seq's current gen border and causes
-		 * hotness inversion. In that very unlikely case,
-		 * just activate the folio.
+		 * Gen-index reuse can fool cmpxchg(). Retry locklessly, accepting
+		 * an extra reference to avoid folio_activate() latency.
 		 */
+		if (unlikely(READ_ONCE(lrugen->max_seq) != max_seq)) {
+			force = true;
+			aged = true;
+		}
 		lru_gen_update_size(lruvec, type, folio, gen, new_gen);
-		if (unlikely(READ_ONCE(lrugen->max_seq) - max_seq > MIN_NR_GENS))
-			folio_activate(folio);
 	}
 
 	if (lru_refs_is_active(old_refs) != lru_refs_is_active(refs) && gen >= 0) {
@@ -1406,6 +1401,10 @@ out:
 				  folio_zonenum(folio), -nr_pages);
 		__update_lru_size(lruvec, lru + lru_refs_is_active(refs),
 				  folio_zonenum(folio), nr_pages);
+	}
+	if (aged) {
+		aged = false;
+		goto retry;
 	}
 
 	rcu_read_unlock();
@@ -1457,7 +1456,8 @@ bool folio_reset_lru_refs(struct folio *folio)
  * Update the lru refs indicator of an isolated folio, only used on
  * mapped folios upon the final eviction.
  *
- * Increments the refs count (capped at LRU_REFS_PROTECTED).  Returns true
+ * Increments the refs count (capped at LRU_REFS_PROTECTED, evict_folios()
+ * then caps it at LRU_REFS_WORKINGSET).  Returns true
  * if the caller should activate the folio (second access or
  * executable), false to put it back for a second chance.
  */
